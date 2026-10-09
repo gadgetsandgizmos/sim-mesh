@@ -28,8 +28,9 @@ use std::mem::ManuallyDrop;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Datagrams handled in one turn of the event loop, at most.
 const PUMP_BATCH: usize = 256;
@@ -85,6 +86,15 @@ struct Inbox {
     wake: (RawFd, RawFd),
     /// Wakes the reader's poll to stop it.
     halt: (RawFd, RawFd),
+    /// Times `signal` actually poked `wake` (the 0->1 edge), from either
+    /// thread. Always on, like `drops`: one more atomic add on a path that
+    /// already does one (Phase A instrumentation).
+    wake_pokes: AtomicU64,
+    /// Phase B: paired with `queue`'s own mutex (the standard pairing), so
+    /// `pump` can wait for the next datagram without the wake pipe's round
+    /// trip through the asyncio loop. The pipe stays, for when `pump` has
+    /// given up and returned: see `pump`'s quiescence loop.
+    cv: Condvar,
 }
 
 impl Inbox {
@@ -92,6 +102,7 @@ impl Inbox {
         if !self.signaled.swap(true, Ordering::SeqCst) {
             poke(self.wake.1);
         }
+        self.cv.notify_all();
     }
 
     /// The reader thread: the socket's datagrams into the queue, until stopped.
@@ -188,6 +199,40 @@ fn sockaddr_to(storage: &libc::sockaddr_storage) -> Option<SocketAddr> {
         }
         _ => None,
     }
+}
+
+/// The reverse of `sockaddr_to`: a Rust address as `sendmmsg` wants it, with
+/// the length of the variant actually written.
+fn sockaddr_from(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+    // SAFETY: zeroed is a valid sockaddr_storage; only the prefix matching
+    // the variant below is meaningful, and only that much is declared.
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let len = match addr {
+        SocketAddr::V4(a) => {
+            let sin = libc::sockaddr_in {
+                sin_family: libc::AF_INET as _,
+                sin_port: a.port().to_be(),
+                sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) },
+                sin_zero: [0; 8],
+            };
+            // SAFETY: sockaddr_in is no larger than sockaddr_storage.
+            unsafe { std::ptr::write((&mut storage as *mut libc::sockaddr_storage).cast(), sin) };
+            std::mem::size_of::<libc::sockaddr_in>()
+        }
+        SocketAddr::V6(a) => {
+            let sin6 = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as _,
+                sin6_port: a.port().to_be(),
+                sin6_flowinfo: 0,
+                sin6_addr: libc::in6_addr { s6_addr: a.ip().octets() },
+                sin6_scope_id: a.scope_id(),
+            };
+            // SAFETY: sockaddr_in6 is no larger than sockaddr_storage.
+            unsafe { std::ptr::write((&mut storage as *mut libc::sockaddr_storage).cast(), sin6) };
+            std::mem::size_of::<libc::sockaddr_in6>()
+        }
+    };
+    (storage, len as libc::socklen_t)
 }
 
 /// time.monotonic(), which the event loop's clock is.
@@ -393,6 +438,39 @@ struct State {
     /// The earliest event on Python's heap, None when it is empty.
     due: Option<i64>,
     closed: bool,
+    // ---- instrumentation (Phase A, gated by `Core.counters_on`) ---------
+    /// Datagrams off the wire, by what `datagram` found them to be.
+    dg_idle: i64,
+    dg_state: i64,
+    dg_tx: i64,
+    /// Not idle/state/tx: forwarded to Python as `_core_datagram`.
+    dg_other: i64,
+    /// `pump` calls, and the datagrams each one took off the inbox.
+    pumps: i64,
+    pump_dg_sum: i64,
+    pump_dg_max: i64,
+    pump_dg_eq0: i64,
+    pump_dg_eq1: i64,
+    /// Calls out to Python's `_core_*`, by which one.
+    cb_flush: i64,
+    cb_due: i64,
+    cb_ask: i64,
+    cb_paced: i64,
+    cb_idle: i64,
+    cb_drain: i64,
+    cb_datagram: i64,
+    cb_log: i64,
+    // ---- Phase B instrumentation (also gated by `counters_on`) ----------
+    /// `pump` entries from the event loop, vs. `pumps`' inner rounds: the
+    /// quiescence loop's whole point is to make `pumps` >> `pump_calls`.
+    pump_calls: i64,
+    /// Rounds that returned for want of more within `pump_wait_us`.
+    pump_timeouts: i64,
+    /// Rounds that returned on `pump_cap_us`, work still waiting.
+    pump_capped: i64,
+    /// `send_many` calls, and the datagrams they carried (sendmmsg).
+    send_batches: i64,
+    send_batch_dg: i64,
 }
 
 impl State {
@@ -488,6 +566,15 @@ struct Core {
     standing_quantum_us: i64,
     slow_idle_s: f64,
     resend_gap_s: f64,
+    /// `ETHER_CORE_COUNTERS` read once at construction (Phase A instrumentation).
+    counters_on: bool,
+    /// `ETHER_CORE_PUMP_WAIT_US` (W): how long `pump` waits, GIL released,
+    /// for the next datagram before giving the loop a turn. Default 200.
+    pump_wait_us: u64,
+    /// `ETHER_CORE_PUMP_CAP_US` (C): the most `pump` spends in one call from
+    /// the loop before returning regardless, so other fds stay serviced.
+    /// Default 5000.
+    pump_cap_us: u64,
 }
 
 impl Core {
@@ -501,6 +588,53 @@ impl Core {
 
     fn log(&self, py: Python<'_>, msg: String) -> PyResult<()> {
         self.call(py, "_core_log", (msg,)).map(|_| ())
+    }
+
+    /// One line for simd.log at `close`, with Phase A's counters (gated by
+    /// `counters_on`): datagrams by type, `pump` batches, wake pokes, and the
+    /// `_core_*` callbacks, alongside the barrier/run/resend counts this
+    /// state already kept.
+    fn counters_report(&self) -> String {
+        let s = self.s.borrow();
+        let mean = if s.pumps > 0 { s.pump_dg_sum as f64 / s.pumps as f64 } else { 0.0 };
+        format!(
+            "core counters: datagrams idle={} state={} tx={} other={} total={} \
+             | pumps={} dg_per_pump_mean={:.3} max={} eq0={} eq1={} wake_pokes={} drops={} \
+             | runs={} barriers={} resends={} \
+             | callbacks flush={} due={} ask={} paced={} idle={} drain={} datagram={} log={} \
+             | pump_calls={} rounds_per_call={:.3} timeouts={} capped={} \
+             | send_batches={} send_batch_dg={} dg_per_send_mean={:.3}",
+            s.dg_idle,
+            s.dg_state,
+            s.dg_tx,
+            s.dg_other,
+            s.dg_idle + s.dg_state + s.dg_tx + s.dg_other,
+            s.pumps,
+            mean,
+            s.pump_dg_max,
+            s.pump_dg_eq0,
+            s.pump_dg_eq1,
+            self.inbox.wake_pokes.load(Ordering::SeqCst),
+            self.inbox.drops.load(Ordering::SeqCst),
+            s.runs,
+            s.barriers,
+            s.resends,
+            s.cb_flush,
+            s.cb_due,
+            s.cb_ask,
+            s.cb_paced,
+            s.cb_idle,
+            s.cb_drain,
+            s.cb_datagram,
+            s.cb_log,
+            s.pump_calls,
+            if s.pump_calls > 0 { s.pumps as f64 / s.pump_calls as f64 } else { 0.0 },
+            s.pump_timeouts,
+            s.pump_capped,
+            s.send_batches,
+            s.send_batch_dg,
+            if s.send_batches > 0 { s.send_batch_dg as f64 / s.send_batches as f64 } else { 0.0 },
+        )
     }
 
     /// One datagram out, as the event loop's transport sends it: a full
@@ -529,24 +663,78 @@ impl Core {
         }
     }
 
-    /// A `run` to a station due at T, the message the barrier itself sends.
-    fn send_run(&self, sid: i64) {
-        let sent = {
+    /// A `run` to a station due at T, the message the barrier itself sends:
+    /// built and recorded here, sent with the rest of its step as one
+    /// `send_many` batch (`step_to`).
+    fn prepare_run(&self, sid: i64) -> Option<(SocketAddr, Vec<u8>)> {
+        let mut s = self.s.borrow_mut();
+        let (seq, t) = s.grant(sid, None)?;
+        let data = format!("{{\"type\": \"run\", \"seq\": {}, \"t\": {}}}", seq, t).into_bytes();
+        s.runs += 1;
+        let st = s.stations.get_mut(&sid).expect("granted");
+        st.unanswered.push((seq, data.clone()));
+        Some((st.addr, data))
+    }
+
+    /// Several datagrams out in one syscall (`sendmmsg`), each to its own
+    /// address, in the given order: a send the kernel cannot take at once is
+    /// waited out exactly as `send_raw` does for one, resuming with whatever
+    /// of the batch is left.
+    fn send_many(&self, msgs: &[(SocketAddr, Vec<u8>)]) {
+        if msgs.is_empty() || self.s.borrow().closed {
+            return;
+        }
+        if self.counters_on {
             let mut s = self.s.borrow_mut();
-            match s.grant(sid, None) {
-                None => None,
-                Some((seq, t)) => {
-                    let data = format!("{{\"type\": \"run\", \"seq\": {}, \"t\": {}}}", seq, t)
-                        .into_bytes();
-                    s.runs += 1;
-                    let st = s.stations.get_mut(&sid).expect("granted");
-                    st.unanswered.push((seq, data.clone()));
-                    Some((data, st.addr))
-                }
+            s.send_batches += 1;
+            s.send_batch_dg += msgs.len() as i64;
+        }
+        let mut slots: Vec<(libc::sockaddr_storage, libc::socklen_t)> =
+            msgs.iter().map(|(addr, _)| sockaddr_from(*addr)).collect();
+        let mut iovecs: Vec<libc::iovec> = msgs
+            .iter()
+            // SAFETY: sendmmsg only reads through iov_base; iovec's type is
+            // shared with recv, where it is written through.
+            .map(|(_, data)| libc::iovec { iov_base: data.as_ptr() as *mut _, iov_len: data.len() })
+            .collect();
+        let mut hdrs: Vec<libc::mmsghdr> = (0..msgs.len())
+            .map(|i| libc::mmsghdr {
+                msg_hdr: libc::msghdr {
+                    msg_name: (&mut slots[i].0 as *mut libc::sockaddr_storage).cast(),
+                    msg_namelen: slots[i].1,
+                    msg_iov: &mut iovecs[i],
+                    msg_iovlen: 1,
+                    msg_control: std::ptr::null_mut(),
+                    msg_controllen: 0,
+                    msg_flags: 0,
+                },
+                msg_len: 0,
+            })
+            .collect();
+        let mut sent = 0usize;
+        let mut retries = 0;
+        while sent < hdrs.len() {
+            // SAFETY: `hdrs[sent..]` and the iovec/sockaddr slots they point
+            // into all live for this whole call.
+            let rc = unsafe {
+                libc::sendmmsg(self.sock.as_raw_fd(), hdrs[sent..].as_mut_ptr(), (hdrs.len() - sent) as _, 0)
+            };
+            if rc > 0 {
+                sent += rc as usize;
+                retries = 0;
+                continue;
             }
-        };
-        if let Some((data, addr)) = sent {
-            self.send_raw(&data, addr);
+            match std::io::Error::last_os_error().kind() {
+                ErrorKind::Interrupted => continue,
+                ErrorKind::WouldBlock if retries < SEND_RETRIES => {
+                    retries += 1;
+                    let mut pfd =
+                        libc::pollfd { fd: self.sock.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+                    // SAFETY: one valid pollfd.
+                    unsafe { libc::poll(&mut pfd, 1, SEND_RETRY_MS) };
+                }
+                _ => break,
+            }
         }
     }
 
@@ -761,9 +949,7 @@ impl Core {
                 })
                 .collect()
         };
-        for (addr, data) in out {
-            self.send_raw(&data, addr);
-        }
+        self.send_many(&out);
     }
 
     fn advance(&self, py: Python<'_>) -> PyResult<()> {
@@ -872,9 +1058,9 @@ impl Core {
             .filter(|(_, st)| st.idle && st.until.is_some_and(|u| u <= t))
             .map(|(sid, _)| *sid)
             .collect();
-        for sid in sids {
-            self.send_run(sid);
-        }
+        let msgs: Vec<(SocketAddr, Vec<u8>)> =
+            sids.into_iter().filter_map(|sid| self.prepare_run(sid)).collect();
+        self.send_many(&msgs);
         Ok(())
     }
 
@@ -917,6 +1103,8 @@ impl Core {
             stop: AtomicBool::new(false),
             wake: pipe()?,
             halt: pipe()?,
+            wake_pokes: AtomicU64::new(0),
+            cv: Condvar::new(),
         });
         let reader = {
             let inbox = Arc::clone(&inbox);
@@ -948,6 +1136,28 @@ impl Core {
                 standing: 0,
                 due: None,
                 closed: false,
+                dg_idle: 0,
+                dg_state: 0,
+                dg_tx: 0,
+                dg_other: 0,
+                pumps: 0,
+                pump_dg_sum: 0,
+                pump_dg_max: 0,
+                pump_dg_eq0: 0,
+                pump_dg_eq1: 0,
+                cb_flush: 0,
+                cb_due: 0,
+                cb_ask: 0,
+                cb_paced: 0,
+                cb_idle: 0,
+                cb_drain: 0,
+                cb_datagram: 0,
+                cb_log: 0,
+                pump_calls: 0,
+                pump_timeouts: 0,
+                pump_capped: 0,
+                send_batches: 0,
+                send_batch_dg: 0,
             }),
             owner: RefCell::new(Some(owner)),
             // SAFETY: a socket fd the caller keeps open until close().
@@ -959,6 +1169,15 @@ impl Core {
             standing_quantum_us,
             slow_idle_s,
             resend_gap_s,
+            counters_on: std::env::var_os("ETHER_CORE_COUNTERS").is_some_and(|v| v != "0"),
+            pump_wait_us: std::env::var("ETHER_CORE_PUMP_WAIT_US")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200),
+            pump_cap_us: std::env::var("ETHER_CORE_PUMP_CAP_US")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5000),
         })
     }
 
@@ -979,38 +1198,111 @@ impl Core {
     /// calls this when `wake_fd` is readable. What is not handled here, past
     /// the batch or behind a call out that raised, stays queued ahead of
     /// anything newer, and the loop is woken for it again.
+    /// Phase B: pumps to quiescence. One call from the event loop now runs
+    /// `datagram`/`advance` (same FIFO order, same callbacks inline with the
+    /// GIL, as always) round after round, only waiting between rounds — with
+    /// the GIL released, on a `Condvar` paired with the inbox's own mutex,
+    /// not the wake pipe — for up to `pump_wait_us`. It returns to the loop
+    /// (so the websocket, drivers and timers get a turn) when a wait finds
+    /// nothing, or `pump_cap_us` total is up; the wake pipe is left armed
+    /// for whichever of those is why, so the loop is woken again for it.
     fn pump(&self, py: Python<'_>) -> PyResult<()> {
-        // The pipe emptied first, then the flag: a datagram queued in between
-        // leaves the flag set and so no byte of its own, but it is queued
-        // before the batch below is taken. The other way round a byte could
-        // be emptied from under a flag still set, and what came after it
-        // would wait with nothing to wake the loop.
+        if self.counters_on {
+            self.s.borrow_mut().pump_calls += 1;
+        }
+        let deadline = Instant::now() + Duration::from_micros(self.pump_cap_us);
+        // The pipe emptied first, then the flag: a datagram queued in
+        // between leaves the flag set and so no byte of its own, but it is
+        // queued before the batch below is taken. The other way round a byte
+        // could be emptied from under a flag still set, and what came after
+        // it would wait with nothing to wake the loop. Done once here, not
+        // every round below: resetting it on each round would have the
+        // reader's every push re-poke the pipe on the edge it keeps seeing,
+        // one real syscall per round, exactly the cost this loop exists to
+        // avoid. Quiescence rounds take their wake from the Condvar instead;
+        // the pipe is only looked at again when this call is about to return
+        // (`rearm_if_pending`), which is also the only time it matters.
         empty(self.inbox.wake.0);
         self.inbox.signaled.store(false, Ordering::SeqCst);
-        let mut batch = {
-            let mut queue = self.inbox.queue.lock().unwrap_or_else(|p| p.into_inner());
-            let n = queue.len().min(PUMP_BATCH);
-            queue.drain(..n).collect::<VecDeque<_>>()
-        };
-        let mut result = Ok(());
-        while let Some((data, addr)) = batch.pop_front() {
-            if self.s.borrow().closed {
+        loop {
+            let mut batch = {
+                let mut queue = self.inbox.queue.lock().unwrap_or_else(|p| p.into_inner());
+                let n = queue.len().min(PUMP_BATCH);
+                queue.drain(..n).collect::<VecDeque<_>>()
+            };
+            if self.counters_on {
+                let n = batch.len() as i64;
+                let mut s = self.s.borrow_mut();
+                s.pumps += 1;
+                s.pump_dg_sum += n;
+                s.pump_dg_max = s.pump_dg_max.max(n);
+                match n {
+                    0 => s.pump_dg_eq0 += 1,
+                    1 => s.pump_dg_eq1 += 1,
+                    _ => {}
+                }
+            }
+            let mut result = Ok(());
+            while let Some((data, addr)) = batch.pop_front() {
+                if self.s.borrow().closed {
+                    return Ok(());
+                }
+                if let Err(err) = self.datagram(py, &data, addr) {
+                    result = Err(err);
+                    break;
+                }
+            }
+            {
+                let mut queue = self.inbox.queue.lock().unwrap_or_else(|p| p.into_inner());
+                while let Some(item) = batch.pop_back() {
+                    queue.push_front(item);
+                }
+            }
+            if result.is_err() {
+                self.rearm_if_pending();
+                return result;
+            }
+            if Instant::now() >= deadline {
+                if self.counters_on {
+                    self.s.borrow_mut().pump_capped += 1;
+                }
+                self.rearm_if_pending();
                 return Ok(());
             }
-            if let Err(err) = self.datagram(py, &data, addr) {
-                result = Err(err);
-                break;
+            // Quiescence: wait for the next datagram with the GIL released.
+            // Only `Inbox` (Send+Sync on its own: a Mutex and atomics) goes
+            // into the closure, never `self` (`Core` is unsendable).
+            let wait_us = self.pump_wait_us;
+            let inbox = Arc::clone(&self.inbox);
+            let more = py.allow_threads(move || {
+                let queue = inbox.queue.lock().unwrap_or_else(|p| p.into_inner());
+                if !queue.is_empty() {
+                    return true;
+                }
+                let (queue, _timeout) = inbox
+                    .cv
+                    .wait_timeout(queue, Duration::from_micros(wait_us))
+                    .unwrap_or_else(|p| p.into_inner());
+                !queue.is_empty()
+            });
+            if !more {
+                if self.counters_on {
+                    self.s.borrow_mut().pump_timeouts += 1;
+                }
+                return Ok(());
             }
+            // Looped back with more already queued: round again in Rust,
+            // with no wake pipe and no asyncio iteration in between.
         }
-        let mut queue = self.inbox.queue.lock().unwrap_or_else(|p| p.into_inner());
-        while let Some(item) = batch.pop_back() {
-            queue.push_front(item);
-        }
-        if !queue.is_empty() {
-            drop(queue);
+    }
+
+    /// `signal` iff the inbox still has work, so a caller returning to the
+    /// event loop (on the cap or an error) leaves the wake pipe armed for it.
+    fn rearm_if_pending(&self) {
+        let pending = !self.inbox.queue.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
+        if pending {
             self.inbox.signal();
         }
-        result
     }
 
     /// Move T as far as the barrier lets it, now.
