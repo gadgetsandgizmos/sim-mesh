@@ -13,7 +13,7 @@ script nodes().firmware("<base>_latest") ──► resolve() ──► firmware/
 A firmware is installed as a directory `firmware/<name>/`, unpacked from a
 zip of the same basename (`<name>.zip`), the form it is handed around in. The
 zip, its `node.yaml` and its driver are specified by the firmware contract
-(README.md, *The firmware contract*); this module is the reader.
+(CONTRACT.md); this module is the reader.
 
 **Names.** `<base>_<arch>_<version>`: `<base>` is lower-case letters, digits,
 `-` and `.`, never `_`; `<arch>` is the architecture as `uname -m` spells it

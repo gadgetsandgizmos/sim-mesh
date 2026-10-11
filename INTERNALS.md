@@ -1672,7 +1672,7 @@ reads T; the host reads **node time**, f(T), which is where a node's own
 crystal — drift, an offset — goes. f is the identity unless the station's
 environment has `SIM_MESH_CLOCK_PROFILE`, a piecewise-linear map given as
 `T:node` pairs in microseconds, both increasing, slope 1 outside them (the
-[firmware contract's](README.md#3-what-a-station-is-given) environment); `nodeOf` / `conductorOf` are the only place
+[firmware contract's](CONTRACT.md#3-what-a-station-is-given) environment); `nodeOf` / `conductorOf` are the only place
 it is defined. `simd --clock-ppm P` gives every station one: a
 straight line from T 0 whose slope is off by a draw uniform within ±P parts
 per million, hashed from the seed and the node's name, so each station keeps
