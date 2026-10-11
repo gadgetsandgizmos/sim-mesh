@@ -2429,6 +2429,10 @@ ether, at the T of its hello (at once in a real-time run), so what the
 driver does next it does at that T; `with self.tool_turn(station):` around a
 tool run against the station's host door, during which T stands while the
 tool has the floor and runs while the station works on what it read;
+`await self.tool_settle(station, timeout=5.0)`, inside that turn before the
+tool writes, waits on the wall clock until the station has said it is idle,
+so its bytes land at the turn's T rather than in the middle of the station's
+work there, and never moves T;
 `await self.rpc_ready(station, timeout, marker_wait_s)` and
 `await self.rpc_query(station, line, timeout=None)`, framed RPC.
 
