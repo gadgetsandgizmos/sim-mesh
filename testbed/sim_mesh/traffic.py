@@ -1,5 +1,7 @@
-"""The LXMF traffic driver: a whole run, on the run's own clock, on any
-firmware of category `reticulum` (sim_mesh.reticulum.driver).
+"""The traffic driver: messages between stations for a whole run, on the
+run's own clock, on firmware of one category: LXMF over `reticulum`
+(sim_mesh.reticulum.driver), direct messages over `meshcore` or
+`meshtastic` (sim_mesh.meshcore.driver, sim_mesh.meshtastic.driver).
 
     from sim_mesh import *
     from sim_mesh import traffic
@@ -11,31 +13,41 @@ firmware of category `reticulum` (sim_mesh.reticulum.driver).
     traffic.run(OPTIONS)                    # into the run directory as traffic.json
     sim_pause()
 
+`category` says which; "auto" takes the one every station's firmware is of,
+and refuses a mix, since a run compares one protocol at a time. The
+stations that send and receive are every one, or with `skip_tag` those
+not tagged so (the repeaters), which still forward. What differs between
+the categories is sim_mesh.messaging's: each category's verbs for making a
+node known, what a node knows of the others, its route to one, and a
+direct message.
+
 Phases, each skipped when its option says so:
 
   up        wait until every station is up.
-  identity  each station's LXMF delivery address (the first the
-            `lxmf.identities` verb lists), asked until every station has one.
-  warm      rounds of announces across the stations (the `lxmf.announce` verb;
-            warm_rounds, each spread over warm_spread seconds with warm_gap
-            between rounds), then, on the stations whose firmware can list
-            its paths (the `path` verb), a sample every settle_every seconds
-            until their total does not rise between two samples (or
-            settle_max has passed). With no such station, two settle_every
-            waits. warm_rounds 0 skips the phase.
+  identity  each sending station's destination: for Reticulum its LXMF
+            delivery address (the first the `lxmf.identities` verb lists),
+            asked until every station has one; for the others its name.
+  warm      rounds of announces across the senders (warm_rounds, each
+            spread over warm_spread seconds with warm_gap between rounds),
+            then, on the senders whose firmware can list what it knows of
+            the others, a sample every settle_every seconds until their
+            total does not rise between two samples (or settle_max has
+            passed). With no such station, two settle_every waits.
+            warm_rounds 0 skips the phase.
   snapshot  a snapshot, warm_snapshot, when given.
-  traffic   one message every `every` seconds for `traffic` seconds (the
-            `lxmf.send` verb), the sender, recipient, size class
-            and text all drawn from `seed`, so two runs with one seed and
-            one set of station names send the same messages at the same
-            instants after the traffic starts. `arrivals` "poisson", `pairs`
-            and `hub` vary when the messages go and between whom, keeping
-            the messages themselves (`schedule`). Each send is preceded by
-            the `path` verb at the sender, the route length at send time
-            where the firmware can say it. Size classes: short 20-55
-            characters, two-frame 115-300, and 420-650 (over 500 B on the
-            wire: a link and a resource), weighted 167 : 76 : 39. Every text
-            starts with its marker, `marker` and a four-digit number.
+  traffic   one message every `every` seconds for `traffic` seconds, the
+            sender, recipient, size class and text all drawn from `seed`,
+            so two runs with one seed and one set of station names send the
+            same messages at the same instants after the traffic starts,
+            whatever the protocol. `arrivals` "poisson", `pairs` and `hub`
+            vary when the messages go and between whom, keeping the
+            messages themselves (`schedule`). Each send is preceded by the
+            route at the sender, its length at send time where the firmware
+            can say it. Size classes are `sizes` ({name: (fewest characters,
+            most, weight)}), SIZES by default: short 20-55 characters,
+            two-frame 115-300, and 420-650 (over 500 B on the wire: a link
+            and a resource), weighted 167 : 76 : 39. Every text starts with
+            its marker, `marker` and a four-digit number.
   drain     `drain` seconds after the last send slot.
   gather    with `gather`, every station's `diagnostics`.
   snapshot  end_snapshot, when given.
@@ -54,27 +66,36 @@ import asyncio
 import json
 import os
 import random
-import re
 import time
 
 from sim_mesh import library
+from sim_mesh import messaging
 from sim_mesh.sim import SimError
 
 OPTIONS = {"warm_rounds": 3, "warm_spread": 300.0, "warm_gap": 120.0,
            "settle_every": 180.0, "settle_max": 3600.0, "warm_snapshot": None,
            "traffic": 3600.0, "every": 5.0, "seed": 17, "marker": "G", "drain": 600.0,
            "gather": True, "end_snapshot": None,
-           "arrivals": "even", "hub": None, "hub_share": 0.5, "pairs": 0}
+           "arrivals": "even", "hub": None, "hub_share": 0.5, "pairs": 0,
+           "sizes": None, "category": "reticulum", "skip_tag": None}
 ARRIVALS = ("even", "poisson")
 
 WORDS = ("mesh relay gateway lora packet announce proof link path hop station "
          "field city river bridge north south east west signal").split()
-CLASSES = ["short"] * 167 + ["two"] * 76 + ["big"] * 39
+# Size classes, {name: (fewest characters, most, weight)}: LXMF's, short, two
+# frames, and over 500 B on the wire (a link and a resource).
+SIZES = {"short": (20, 55, 167), "two": (115, 300, 76), "big": (420, 650, 39)}
 RESULT_FILE = "traffic.json"
 
 
-def body(rng, cls, marker):
-    n = {"short": rng.randint(20, 55), "two": rng.randint(115, 300)}.get(cls) or rng.randint(420, 650)
+def body(rng, cls, marker, sizes=None):
+    """A text of class `cls`. A length is drawn for every class but the last,
+    and for the last only when it is the one: the draws traffic has always
+    made, so one seed keeps its texts."""
+    sizes = sizes or SIZES
+    names = list(sizes)
+    drawn = {k: rng.randint(sizes[k][0], sizes[k][1]) for k in names[:-1]}
+    n = drawn.get(cls) or rng.randint(sizes[names[-1]][0], sizes[names[-1]][1])
     text = marker
     while len(text) < n:
         text += "-" + rng.choice(WORDS)
@@ -82,11 +103,12 @@ def body(rng, cls, marker):
 
 
 def schedule(names, seed, duration, every, marker, arrivals="even", hub=None,
-             hub_share=0.5, pairs=0):
+             hub_share=0.5, pairs=0, sizes=None):
     """The traffic: (n, at, src, dst, cls, text), at in seconds after its start.
 
     By default one message every `every` seconds, its sender, recipient, size
-    class and text drawn from `seed`, in that order, from one stream. The
+    class (`sizes`, {name: (fewest, most, weight)}; SIZES by default) and
+    text drawn from `seed`, in that order, from one stream. The
     variants draw from streams of their own, so the messages stay the ones
     the default draws, the same texts of the same classes in the same order,
     and only when they go and between whom changes:
@@ -107,6 +129,8 @@ def schedule(names, seed, duration, every, marker, arrivals="even", hub=None,
         raise ValueError("a hub share is between 0 and 1, not %r" % hub_share)
     if int(pairs) < 0:
         raise ValueError("pairs is a count, not %r" % pairs)
+    sizes = sizes or SIZES
+    classes = [name for name, (_, _, weight) in sizes.items() for _ in range(weight)]
     rng = random.Random(seed)
     times = random.Random("%s:arrivals" % seed)
     ends = random.Random("%s:endpoints" % seed)
@@ -126,8 +150,8 @@ def schedule(names, seed, duration, every, marker, arrivals="even", hub=None,
             break
         src = rng.choice(names)
         dst = rng.choice([s for s in names if s != src])
-        cls = rng.choice(CLASSES)
-        text = body(rng, cls, "%s%04d" % (marker, n + 1))
+        cls = rng.choice(classes)
+        text = body(rng, cls, "%s%04d" % (marker, n + 1), sizes)
         if fixed:
             src, dst = fixed[n % len(fixed)]
         if hub is not None and src != hub and ends.random() < float(hub_share):
@@ -194,36 +218,59 @@ def meta(verb, category=None, **args):
     return out
 
 
+# ---- which protocol ----------------------------------------------------------
+
+def protocol_of(sim, stations, category):
+    """The protocol the stations speak (sim_mesh.messaging): `category`, or
+    with "auto" the one category every station's firmware is of, a mix
+    refused."""
+    if category != "auto":
+        return messaging.protocol(category)
+    by = {}
+    for name in stations:
+        by.setdefault(sim.stations[name].category, []).append(name)
+    if len(by) != 1:
+        raise ValueError("the nodes run firmware of more than one category, and traffic "
+                         "compares one at a time: %s" % "; ".join(
+                             "%s %s" % (cat, ", ".join(names)) for cat, names in sorted(
+                                 by.items(), key=lambda kv: str(kv[0]))))
+    return messaging.protocol(next(iter(by)))
+
+
+def ask_of(proto, step):
+    """A protocol's (verb, args) as the meta message simd takes."""
+    verb, args = step
+    return meta(verb, proto.category, **args)
+
+
 async def run_phases(opts, sim, result, phase, dump):
     stations = sorted(n for n, s in sim.stations.items() if s.firmware)
-    # A station is up before its first-boot lines have all landed, so its
-    # identity may not exist yet: ask until every station has one.
-    dests = {}
-    answers = {}
-    for attempt in range(60):
-        got = await sim.ask(meta("lxmf.identities", "reticulum"),
-                            [n for n in stations if n not in dests],
-                            after=2.0 if attempt else 0.0)
-        for name, held in got.items():
-            answers[name] = held
-            # The identity it sends from, which is first.
-            addr = held[0][1] if isinstance(held, list) and held else None
-            if isinstance(addr, str) and re.fullmatch(r"[0-9a-f]{32}", addr):
-                dests[name] = addr
-        if len(dests) >= len(stations):
-            break
+    try:
+        proto = protocol_of(sim, stations, opts.category)
+    except ValueError:
+        # Nothing to compare: the simulation stops rather than run on unwatched.
+        await sim.stop()
+        raise
+    result["category"] = proto.category
+    # The stations that send and receive: every one, or those without skip_tag.
+    ends = [n for n in stations if opts.skip_tag not in sim.stations[n].tags] \
+        if opts.skip_tag else stations
+    if len(ends) < 2:
+        raise ValueError("traffic needs two stations to send between, and has %d" % len(ends))
+    result["endpoints"] = ends
+    dests, answers = await proto.destinations(sim, ends)
     result["dests"] = dests
     # What a station with no destination last said, and what it runs: what
     # the report tells the reader of why.
     result["no_dest"] = {n: {"firmware": sim.stations[n].firmware,
                              "answer": str(answers.get(n, "nothing"))[:200]}
-                         for n in stations if n not in dests}
-    # Every station, whether or not it has shown its identity: the schedule
-    # is drawn over them, so one seed sends the same messages.
-    senders = stations
+                         for n in ends if n not in dests}
+    # Every endpoint, whether or not it has shown its destination: the
+    # schedule is drawn over them, so one seed sends the same messages.
+    senders = ends
     missing = sorted(set(senders) - set(dests))
     if missing:
-        print("no lxmf destination from: %s" % " ".join(missing), flush=True)
+        print("no destination from: %s" % " ".join(missing), flush=True)
     phase("identities")
 
     async def send_plan(warm_end):
@@ -244,7 +291,7 @@ async def run_phases(opts, sim, result, phase, dump):
     if opts.warm_rounds > 0:
         result["warm"] = {"rounds": [], "samples": []}
         for r in range(opts.warm_rounds):
-            await sim.ask(meta("lxmf.announce", "reticulum"), senders, spread=opts.warm_spread,
+            await sim.ask(ask_of(proto, proto.announce()), senders, spread=opts.warm_spread,
                           after=opts.warm_gap if r else 0.0)
             result["warm"]["rounds"].append([time.time(), sim.t])
             phase("warm_round_%d" % (r + 1))
@@ -255,16 +302,16 @@ async def run_phases(opts, sim, result, phase, dump):
             if not counted:
                 await sim.sleep(2 * opts.settle_every)
                 break
-            reply = await sim.ask(meta("path", "reticulum"), counted, after=opts.settle_every)
+            reply = await sim.ask(ask_of(proto, proto.knowing()), counted, after=opts.settle_every)
             per = {n: len(v) for n, v in reply.items() if isinstance(v, list)}
-            # Only the stations whose firmware can list its paths are asked again.
+            # Only the stations whose firmware can list what it knows are asked again.
             counted = sorted(per)
             if not counted:
                 continue
             total = sum(per.values())
             result["warm"]["samples"].append({"t": sim.t, "wall": time.time(),
                                               "total": total, "per": per})
-            print("  paths %d at run %.0f s" % (total, sim.run_s), flush=True)
+            print("  %s %d at run %.0f s" % (proto.known, total, sim.run_s), flush=True)
             dump()
             if prev is not None and total <= prev:
                 break
@@ -280,7 +327,7 @@ async def run_phases(opts, sim, result, phase, dump):
 
     if opts.traffic > 0:
         plan = schedule(senders, opts.seed, opts.traffic, opts.every, opts.marker,
-                        opts.arrivals, opts.hub, opts.hub_share, opts.pairs)
+                        opts.arrivals, opts.hub, opts.hub_share, opts.pairs, opts.sizes)
         start = sim.run_s + 1.0
         result["traffic_start_run_s"] = start
         await send_plan(start - 1.0)
@@ -299,19 +346,17 @@ async def run_phases(opts, sim, result, phase, dump):
             # simd's own: a message without one is handled inside the
             # socket's reader, which holds every later message behind it.
             try:
-                results, t = await sim.sequence(
-                    [meta("path", "reticulum", to=dst),
-                     meta("lxmf.send", "reticulum", to=dst, text=text)], [src],
-                    after=max(0.001, start + at - sim.run_s))
+                results, t = await sim.sequence([ask_of(proto, proto.route(dst)),
+                                                 ask_of(proto, proto.send(dst, text))], [src],
+                                                after=max(0.001, start + at - sim.run_s))
             except SimError as err:
                 # This message, not the run: the rest go on at their instants.
                 rec["error"] = str(err)[:300]
                 return
             path_out, out = (r.get(src) for r in results)
             rec["t_sent"] = rec["t_path"] = t if t is not None else sim.t
-            rec["hops"] = path_out[0].get("hops") if isinstance(path_out, list) and path_out \
-                else None
-            if not isinstance(path_out, list):
+            rec["hops"] = proto.hops(path_out, dst)
+            if path_out is not None and not isinstance(path_out, list):
                 rec["path_reply"] = str(path_out)[:200]
             good = isinstance(out, str) and out and not out.startswith("! ")
             rec["mid"] = out if good else None
@@ -366,27 +411,33 @@ def report(run_dir, traffic_path=None):
 
     traffic_path = traffic_path or os.path.join(run_dir, RESULT_FILE)
     name = os.path.basename(os.path.normpath(run_dir))
-    lines = ["# LXMF traffic: %s" % name, ""]
-    if not os.path.isfile(traffic_path):
+    drive = {}
+    if os.path.isfile(traffic_path):
+        with open(traffic_path, encoding="utf-8") as handle:
+            drive = json.load(handle)
+    proto = messaging.protocol(drive.get("category") or "reticulum")
+    lines = ["# %s: %s" % (proto.title, name), ""]
+    if not drive:
         return "\n".join(lines + ["No %s: the driver did not get as far as writing it."
                                   % os.path.basename(traffic_path), ""])
     try:
-        drive, out, _ = delivery.analyse_run(traffic_path, run_dir)
+        drive, out, _ = delivery.analyse_run(traffic_path, run_dir, proto.status_event)
     except ValueError as err:
-        with open(traffic_path, encoding="utf-8") as handle:
-            drive, out = json.load(handle), None
+        out = None
         problem = str(err)
     dests = drive.get("dests") or {}
-    stations = sorted(set(drive.get("up") or {}) | set(dests))
+    ends = drive.get("endpoints") or sorted(set(drive.get("up") or {}) | set(dests))
     args = drive.get("args") or {}
     lines += ["| | |", "|---|---|",
               "| ended at | T %s |" % t_text(drive.get("t_end")),
               "| wall | %.0f s |" % ((drive.get("wall_end") or 0) - (drive.get("wall_start") or 0)),
               "| sends | one every %s s for %s s, seed %s |"
               % (args.get("every"), args.get("traffic"), args.get("seed")),
-              "| LXMF identities | %d%s |" % (len(dests), " of %d stations" % len(stations)
-                                             if stations else ""),
-              ""]
+              "| between | %d stations%s |" % (len(ends), ", not those tagged %s" % args["skip_tag"]
+                                               if args.get("skip_tag") else "")]
+    if proto.category == "reticulum":
+        lines.append("| LXMF identities | %d of %d |" % (len(dests), len(ends)))
+    lines.append("")
     if not dests:
         lines += ["**No station showed an LXMF identity**, so nothing could be sent.", ""]
     no_dest = drive.get("no_dest") or {}
@@ -408,19 +459,35 @@ def report(run_dir, traffic_path=None):
         return "\n".join(lines)
 
     def table(title, figures):
-        rows = ["| %s | delivered |" % title, "|---|---|"]
-        return rows + ["| %s | %s |" % (k, v) for k, v in figures.items()] + [""]
+        rows = ["| %s | delivered | proven to the sender |" % title, "|---|---|---|"]
+        return rows + ["| %s | %s | %s |" % (k, v["delivered"], v["proven"])
+                       for k, v in figures.items()] + [""]
 
-    lines += ["## Delivery", "", "**%s** delivered." % out["overall"], ""]
+    def latency(what, lat):
+        return ["%s: median %.1f s, 90%% within %.1f s, longest %.1f s (%d messages)."
+                % (what, lat["median"], lat["p90"], lat["max"], lat["n"]), ""] if lat else []
+
+    lines += ["## Delivery", ""]
+    if out["arrivals_reported"]:
+        lines += ["**%s** delivered: arrived at the recipient, as its driver reported." % out["overall"],
+                  "", "**%s** of those proven back to the sender, **%s** of all sent."
+                  % (out["proven_of_delivered"], out["overall_proven"]), ""]
+        if out["refused"]:
+            lines += ["%d more arrived and were refused by the recipient (a full mailbox): "
+                      "not delivered." % out["refused"], ""]
+        if out["proven_not_seen_arriving"]:
+            lines += ["%d proven to the sender were never reported arriving: the recipient's "
+                      "driver missed them." % out["proven_not_seen_arriving"], ""]
+    else:
+        lines += ["**%s** proven to the sender. This firmware reports no arrivals, so what "
+                  "arrived unproven is not known." % out["overall_proven"], ""]
     lines += table("route hops at send", out["by_route_hops"])
     lines += table("radio hops", out["by_radio_hops"])
     lines += table("size", out["by_class"])
-    lat = out.get("latency_s")
-    if lat:
-        lines += ["Latency: median %.1f s, 90%% within %.1f s, longest %.1f s (%d messages)."
-                  % (lat["median"], lat["p90"], lat["max"], lat["n"]), ""]
+    lines += latency("To arrival", out.get("latency_s"))
+    lines += latency("To proof", out.get("proof_latency_s"))
     if out.get("undelivered_last_word"):
-        lines += ["## Undelivered, by the sender's last word", "", "| last line | messages |",
+        lines += ["## Undelivered, by the last word on it", "", "| last line | messages |",
                   "|---|---|"]
         lines += ["| `%s` | %d |" % (w.replace("|", "\\|"), n)
                   for w, n in out["undelivered_last_word"][:10]]

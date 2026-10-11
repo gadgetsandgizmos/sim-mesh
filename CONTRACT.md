@@ -351,6 +351,26 @@ firmware has an id is reported under `mid` directly. sim-mesh writes each
 event as a line of the run's `events.jsonl`:
 `{"t": <T in µs>, "node": …, "event": …, …fields}`.
 
+**What arrived.** `delivered` above is the sender's word: a proof came
+back across the mesh, a packet as easily lost as the message. Whether the
+message reached its recipient is the recipient's word, and a traffic report
+counts the two apart. A driver whose firmware says them **should** report,
+for every message `lxmf.send` was given, its LXMF message id, and for every
+LXMF message its station receives, that id:
+
+```
+self.lxmf_message_id(station, its_id, message_id)    # lxmf.message.id {mid, message_id}
+self.lxmf_received(station, message_id, sender=<hash>, refused=<why>)
+                                                     # lxmf.message.received {message_id, sender, refused}
+```
+
+The message id is the hash sender and recipient both compute, in hex; a
+firmware that logs only its first sixteen bytes gives those, and ids are
+matched on them. The first is given under the firmware's own id and held
+until the coupling, as `lxmf_native` is. `refused` says why a message that
+arrived was not taken (a full mailbox): it is not delivered. A firmware that
+reports no arrivals has its messages counted by proof alone.
+
 ## 7a. The `meshcore` category
 
 ```

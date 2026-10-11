@@ -103,30 +103,62 @@ starts the front and opens
 `http://localhost:8800/`. The terminal is the
 testbed's: Ctrl-C there stops every simulation and everything they started.
 
-**3. Firmware.** A station runs an installed firmware. On the **Firmware**
-tab, **Download pre-built firmware** lists what sim-mesh.net offers for this
-machine's architecture (`aarch64` or `x86_64`) and **Add** installs one;
-**Import zip** installs a zip of your own. From a shell,
-`sim firmware add <zip or URL>` does the same.
+**3. Firmware.** A station runs an installed firmware. The first test,
+`msg-traffic` below, runs one mesh protocol at a time: pick one, and install
+what it needs. On the **Firmware** tab, **Download pre-built firmware** lists
+what sim-mesh.net offers for this machine's architecture (`aarch64` or
+`x86_64`) and **Add** installs one; **Import zip** installs a zip of your
+own; from a shell, `sim firmware prebuilt` lists them and `sim firmware add
+<zip or URL>` installs one.
 
-**4. A first simulation.** Geodata and nodesets are kept in
-`testbed/geodata/` and `testbed/nodesets/` and never committed: they are
-fetched from an index, or made here. On the **Geodata** tab, **Download
-pre-built geodata packs** lists what sim-mesh's own index, `sim-mesh-examples`, and
-any index you add offer, and a click on one installs it; or make ground,
-**Build** over a rectangle of the map or **New synthetic**. Click it to
-choose it. The **Nodes** tab lists the nodesets with a node on it, beside a
-map of the ones checked: **New** one and place nodes on it, **Import** them
-from a public node map or a file, or fetch a nodeset from an index under
-**Download pre-built nodesets**; a click on a nodeset opens it to edit. On
-the **Scripts** tab open
-`lxmf-traffic`, choose the firmware its nodes run in **Firmware for nodes
-not otherwise configured** above the script, and **Run** it: a new
-simulation of that nodeset on that ground. The page goes over to the
-simulation's live map, framed on its nodes, and its stations come up over
-the next minute; rings on the map are frames on the air. For a simulation
-to work with by hand, run `realtime`: every node on the chosen firmware,
-on the wall clock, set up by the startup script and left running.
+| protocol | for the repeaters | for the other nodes |
+|---|---|---|
+| MeshCore | MeshCore repeater | MeshCore companion |
+| Meshtastic | Meshtastic | the same |
+| Reticulum | any Reticulum firmware: Reticulous (dev or stable), Sergeyculum | the same, or another Reticulum firmware |
+
+MeshCore needs two: a repeater is a firmware build of its own, which only
+forwards, and the nodes people message from are companions. Meshtastic and
+Reticulum run one firmware everywhere, the repeaters told to forward
+(Meshtastic's router role, Reticulum's transport). Under Reticulum the
+repeaters need no LXMF of their own: a transport-only firmware that never
+sends a message itself can be the repeaters' while an LXMF one is the
+others'.
+
+**4. A first test.** Geodata and nodesets are kept in `testbed/geodata/` and
+`testbed/nodesets/` and never committed: they are fetched from an index, or
+made here. On the **Geodata** tab, under **Download pre-built geodata
+packs**, click **berlin-centre**, central Berlin from sim-mesh's own index
+(`sim-mesh-examples`); it brings its nodeset, **berlin-50**: the 40
+repeaters and 10 companions nearest the middle of it, where a real MeshCore
+network advertised them. Click berlin-centre in the installed list to choose
+it, and berlin-50 on the **Nodes** tab to open it. On the **Scripts** tab
+open `msg-traffic`, choose the two firmware above it, **Firmware for the
+nodes that are not repeaters** and **Firmware for the repeaters**, and
+**Run** it. From a shell:
+
+```sh
+sim geodata add berlin-centre          # brings berlin-50
+sim run msg-traffic --geodata berlin-centre --nodeset berlin-50 \
+    --set firmware=meshcore-companion-sx1262_latest \
+    --set repeater_firmware=meshcore-repeater-sx1262_latest
+```
+
+with another protocol's two firmware for another. The page goes over to the
+simulation's live map, framed on its nodes, and its stations come up; rings
+on the map are frames on the air. They announce until they know each other,
+then the ten send each other a message every 5 s for an hour of virtual
+time, which takes minutes, and the simulation pauses with its **Report**:
+how many messages arrived, how many of those the sender heard back about,
+and how long both took. The same seed sends the same messages between the
+same nodes whatever the protocol, so run it again on another and the two
+reports compare like for like ([Scripts](#scripts)).
+
+Geodata can also be built here, **Build** over a rectangle of the map or
+**New synthetic**, and nodesets drawn (**New**) or imported from a public
+node map or a file (**Import**). For a simulation to work with by hand, run
+`realtime`: every node on the chosen firmware, on the wall clock, set up by
+the startup script and left running.
 
 **5. Play with it.**
 
@@ -1118,6 +1150,17 @@ to be up first (a node with no firmware refuses), and answering
   `pause` seconds of the run's clock apart; each answers what it printed.
 - `.reset()`, `.factory_reset()`; `.up()`; `.move(lat, lon, height_m=None)`
   (one node); `.facts()`, each node's facts.
+- Messaging, whatever mesh each node runs (`sim_mesh/messaging.py`):
+  `.message(to, text)`, a direct message from each node to the node `to`,
+  answering its id, and `.announce(spread=0)`, each node made known to the
+  others. Each node does it in its own category's verb, so one selection
+  can hold Reticulum, MeshCore and Meshtastic nodes at once:
+
+  | category | `.message` is | `.announce` is |
+  |---|---|---|
+  | `reticulum` | `.reticulum.lxmf.send` | `.reticulum.lxmf.announce` |
+  | `meshcore` | `.meshcore.msg` | `.meshcore.floodadv` |
+  | `meshtastic` | `.meshtastic.sendtext` | `.meshtastic.nodeinfo` |
 - A firmware's own commands, which each driver does its own way: `.radio(…)`
   and `.radio_up()`, every firmware's; and under `.reticulum`, for a
   selection's Reticulum nodes and nothing to the others (a selection with
@@ -1182,11 +1225,13 @@ paused one, which it resumes. The script is a process of its own (`python3
 run's `scripts.log`; from a shell:
 
 ```sh
-sim run lxmf-traffic --geodata berlin-city --nodeset mitte7 --set firmware=relay-sx1262_latest
+sim run msg-traffic --geodata berlin-centre --nodeset berlin-50 \
+    --set firmware=meshtastic-sx1262_latest --set repeater_firmware=meshtastic-sx1262_latest
 sim run ./my-study.py --geodata stralsund --nodeset fachhochschule --nodeset more \
     --set firmware=relay-sx1262_latest --set other=relay-big-sx1262_latest
-sim run lxmf-traffic --sim mitte7 --set firmware=relay-sx1262_latest
-sim run lxmf-traffic --resume mitte7 --set firmware=relay-sx1262_latest
+sim run realtime --sim berlin-50 --set firmware=meshtastic-sx1262_latest
+sim run msg-traffic --resume berlin-50 \
+    --set firmware=meshtastic-sx1262_latest --set repeater_firmware=meshtastic-sx1262_latest
 ```
 
 A simulation keeps a copy of a script of `scripts/` (a file from elsewhere
@@ -1222,6 +1267,47 @@ station what taking part needs, an LXMF identity. Its report is the delivery
 (the run's `events.jsonl`): overall, by route and radio hops and by size,
 the latency, and the undelivered by the last state reported; it says so
 plainly when no station had an LXMF identity to send from.
+
+`scripts/msg-traffic.py` is the same run for comparing protocols, and the
+quickest way to see one work: direct messages between the nodes not tagged
+`repeater`, on Reticulum, MeshCore or Meshtastic, whichever the nodes run
+(`sim_mesh/messaging.py`). On `berlin-centre` with `berlin-50`, both from
+sim-mesh's own index, that is ten senders among forty repeaters:
+
+```sh
+sim firmware prebuilt                  # what sim-mesh.net offers this machine
+sim firmware add https://sim-mesh.net/firmware/<name>.zip   # the companion, and the repeater
+sim geodata add berlin-centre          # brings its nodesets, berlin-50 among them
+sim run msg-traffic --geodata berlin-centre --nodeset berlin-50 \
+    --set firmware=meshcore-companion-sx1262_latest \
+    --set repeater_firmware=meshcore-repeater-sx1262_latest
+```
+
+It asks for two firmware, one for the repeaters, which only forward, and
+one for the rest (for MeshCore a repeater build and a companion; for
+Reticulum and Meshtastic the two may be one), and `reticulous_settings`,
+lines said to Reticulous nodes at first boot before their radio starts
+(`set s.lora.0.community_radius 10; set s.lxmf.stamp_cost 0`), `none` by
+default. The driver takes the category from what the stations run
+(`category: auto`) and stops the simulation when they run a mix. Warm-up is
+that protocol's announce until what the senders know of each other (paths,
+contacts, nodes) stops growing; a message is `.message`'s verb, its route
+at send time the path's hops or Meshtastic's hops away; its texts are 20-55
+characters, which every protocol carries in one packet, and Reticulous is
+told to send them so and to retry them so (`s.lxmf.default_method
+link-if-big`, `s.lxmf.small_retry opportunistic`). One seed sends the same
+messages between the same pairs at the same instants whatever the protocol.
+
+Its report, and `lxmf-traffic`'s, counts two things for every message
+(`sim_mesh/reticulum/delivery.py`): **delivered**, it arrived at its
+recipient, as the recipient's driver reports (`msg.received`,
+`lxmf.message.received`), a message that arrived and was refused (a full
+mailbox) counted apart and not delivered; and **proven**, the sender heard
+so, a proof or an acknowledgement back across the mesh (`msg.status` or
+`lxmf.message.status` `delivered`), as a number of its own and as a share
+of the delivered. Each is shown by route hops at send, radio hops and size,
+with the latency to arrival and to proof. A firmware whose driver reports no
+arrivals is counted by proof alone, and the report says so.
 
 ## Loss tables
 
@@ -1757,8 +1843,10 @@ in, to choose the rest and Run. `--no-browser` opens nothing, and only says
 the page (`page: <url>`).
 
 ```sh
-sim run lxmf-traffic --geodata berlin-city --nodeset mitte7 --name lora \
-    --set firmware=relay-sx1262_latest         # a script's own simulation (Scripts)
+sim run msg-traffic --geodata berlin-centre --nodeset berlin-50 --name lora \
+    --set firmware=meshcore-companion-sx1262_latest \
+    --set repeater_firmware=meshcore-repeater-sx1262_latest
+                                               # a script's own simulation (Scripts)
 sim new pw --geodata berlin-city --nodeset mitte7 --time max --pairwise
                                                # a bare one, its ether on the pairwise rule;
                                                # prints its control address, ether, network and run as JSON
@@ -1772,7 +1860,7 @@ sim resume lora                                # started again as it ended, in a
 sim resume lora --time max                     # or as fast as it goes
 sim run my-study --resume lora                 # or a script on it, in the script's time
 sim stop lora                                  # a paused one: its state deleted, it ended
-sim run lxmf-traffic --sim lora --set firmware=relay-sx1262_latest
+sim run realtime --sim lora --set firmware=meshcore-companion-sx1262_latest
                                                # a script, one of scripts/ by name or a path,
                                                # on a running simulation
 ```
@@ -2041,7 +2129,7 @@ what `airtime.py --roles` and the hop counts through forwarding stations use.
 | `compare.py RUN_A RUN_B` | two runs side by side: milestones, per-station counts, paths; one run's figures alone |
 | `airtime.py RUN` | airtime per station, per carrier and per frame kind; transmit power; exchanges at reduced power; CRC losses; with `--busy` the calling channel's occupancy where each station stands, with `--roles` airtime per role |
 | `links.py RUN` | link geometry: distance of every usable one-way link, neighbours, hop diameter, beside what the run's loss table says would decode; with `--power`, traffic-channel power against distance |
-| `delivery.py TRAFFIC.json RUN` | an LXMF traffic run's delivery (the `traffic.json` `scripts/lxmf-traffic.py` writes) from what the senders' drivers reported (`events.jsonl`): by route hops, radio hops (by the run's loss table), size, latency |
+| `delivery.py TRAFFIC.json RUN` | a traffic run's delivery (the `traffic.json` `scripts/lxmf-traffic.py` or `msg-traffic.py` writes) from what the stations' drivers reported (`events.jsonl`): delivered (arrived) and proven to the sender, by route hops, radio hops (by the run's loss table), size, latency |
 | `compliance.py RUN` | which nodes went over their EN 300 220 budgets: per node and band entry, seconds on the air in the worst sliding hour against the entry's duty cycle (or polite spectrum access where the entry permits it: 100 s an hour per 200 kHz, frames up to 1 s, 100 ms apart on one carrier), and highest e.r.p. (power + antenna gain − 2.15 dB) against its limit; frames on spectrum no entry allows. The section every report ends with; `--json` for the figures |
 | `referee.py --run RUN` | how the stations behaved on the air: every transmission that began over a frame on its carrier its sender could decode, whether the ether had told the sender of that frame (at its start, mid-frame, never) and in which window of it (its first four symbols, its preamble, its payload); the frames nobody was told of, by sender and channel; every reception that ended `crc`, each overlap split by whether the two senders could hear each other. Run by hand, not part of `report.md`; `--detail` for every event, `--json` for all of it |
 
@@ -2362,7 +2450,9 @@ tests, in place of `testbed/geodata/.cache/meshcore/nodes.json`.
 | `testbed/nodeset.py` | nodesets: nodes, their maximum powers, antennas and tags (a role tag, `no-radio`), offsets, links, edits, the geometry hash, the merge of several nodesets, the imports (the planner's CSVs, any CSV, GeoJSON, KML, GPX, a Meshtastic node list) |
 | `planner/` | the Rust workspace: `planner-web` (the sidecar), `planner-job` (a pack's build, a node map's import), `planner-pack` (the compiler, OpenStreetMap from a PBF extract), `planner-buildings`, `planner-import`, and the ground, propagation and coverage crates |
 | `testbed/script.py` | scripts: listing, checking, loading, a script's inputs read without running it |
-| `testbed/sim_mesh/library.py`, `testbed/sim_mesh/select.py` | the script library: `script_…`, `sim_…`, and `nodes()`/`node()` selections with what is done to them (`.firmware`, `.on_first_boot`, `.exec`, `.radio`, `.reticulum…`, `.meshcore…`, `.meshtastic…`), `Node` for first-boot rules, and `scripts.log` |
+| `testbed/sim_mesh/library.py`, `testbed/sim_mesh/select.py` | the script library: `script_…`, `sim_…`, and `nodes()`/`node()` selections with what is done to them (`.firmware`, `.on_first_boot`, `.exec`, `.radio`, `.message`, `.announce`, `.reticulum…`, `.meshcore…`, `.meshtastic…`), `Node` for first-boot rules, and `scripts.log` |
+| `testbed/sim_mesh/messaging.py` | messaging whatever mesh a node runs: each category's verbs for a direct message, an announce, what a node knows of the others and its route to one (`PROTOCOLS`), behind `.message` and `.announce` and the traffic driver |
+| `testbed/sim_mesh/traffic.py`, `testbed/sim_mesh/reticulum/delivery.py` | the traffic driver (`lxmf-traffic`, `msg-traffic`): warm-up, the seeded schedule, the sends, the report; and its count, delivered and proven |
 | `testbed/losses.py` | a loss table, on synthetic ground or through the sidecar; the cache; links, shadowing, antennas and offsets as layers, the ground under each node; one node's row |
 | `testbed/coverage.py` | a node's coverage raster on a pack, through the sidecar, cached |
 | `testbed/runs.py` | a run directory, and snapshots taken from and loaded into one |
@@ -2374,7 +2464,7 @@ tests, in place of `testbed/geodata/.cache/meshcore/nodes.json`.
 | `testbed/seq.py`, `compare.py`, `airtime.py`, `links.py`, `delivery.py`, `compliance.py`, `referee.py` | the analysis tools ([Reading a run](#reading-a-run)) |
 | `testbed/sim_mesh/` | the library: `library` (what a script says, synchronously), `select` (`nodes()`), `driver` (what a firmware's driver is, and what sim-mesh hands it), `traffic` (the LXMF traffic driver), `sim` (the async hold on a simulation the library runs on), `runner` (a script run, its simulation started, its report), `view` (a run opened for analysis), `record`; `sim_mesh/reticulum/` holds Reticulum's parts: the category's driver interface, frame reading (Reticulum packets, SUPE), delivery analysis; `sim_mesh/meshcore/` and `sim_mesh/meshtastic/` the `meshcore` and `meshtastic` categories' driver interfaces |
 | `testbed/boards.py` | the one board, an SX1262 with a GC1109 front end above 22 dBm; a node's maximum power; what a station is told of it |
-| `testbed/scripts/` | the scripts: the examples (`script.EXAMPLES`) `realtime.py`, `lxmf-traffic.py`, `meshtastic-check.py` and `startup.py`, which every script includes; `globals.py`, the settings they share and the page reads; and your own beside them |
+| `testbed/scripts/` | the scripts: the examples (`script.EXAMPLES`) `realtime.py`, `lxmf-traffic.py`, `msg-traffic.py`, `meshtastic-check.py` and `startup.py`, which every script includes; `globals.py`, the settings they share and the page reads; and your own beside them |
 | `testbed/geodata/`, `testbed/nodesets/` | your geodata and nodesets (not committed) |
 | `testbed/testdata/` | what the tests stand on: the four stations `four.yaml` on the synthetic ground `plain-27.yaml` |
 

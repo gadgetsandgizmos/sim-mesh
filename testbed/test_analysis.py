@@ -38,6 +38,8 @@ import slt  # noqa: E402
 import sim_mesh  # noqa: E402
 from sim_mesh import reticulum  # noqa: E402
 from sim_mesh.reticulum import frames  # noqa: E402
+from sim_mesh.reticulum import delivery as rdelivery  # noqa: E402
+from sim_mesh import messaging  # noqa: E402
 from sim_mesh import traffic as rtraffic  # noqa: E402
 from sim_mesh.view import RunView  # noqa: E402
 
@@ -474,6 +476,35 @@ def test_frames_alike_in_their_bytes_at_one_instant_keep_their_own_receptions(tm
     assert got == {1: ({4}, 0), 2: (set(), 1)}
 
 
+def test_delivery_tells_arrived_from_proven(tmp_path):
+    """An LXMF message arrives by its message id, which the sender's driver
+    tied to sim-mesh's id (a firmware logging only a prefix matches on it);
+    a MeshCore or Meshtastic one by sim-mesh's id. One that arrived and was
+    refused is not delivered; one proven is counted apart."""
+    events = [
+        {"event": "lxmf.message.id", "node": "a", "mid": "a.1", "message_id": "ab" * 32, "t": 1},
+        {"event": "lxmf.message.id", "node": "a", "mid": "a.2", "message_id": "cd" * 16, "t": 1},
+        {"event": "lxmf.message.id", "node": "a", "mid": "a.3", "message_id": "ef" * 32, "t": 1},
+        {"event": "lxmf.message.received", "node": "b", "message_id": "ab" * 16, "t": 4_000_000},
+        {"event": "lxmf.message.received", "node": "b", "message_id": "cd" * 32, "t": 5_000_000},
+        {"event": "lxmf.message.received", "node": "b", "message_id": "ef" * 32,
+         "refused": "the strangers' share used", "t": 5_000_000},
+        {"event": "lxmf.message.status", "node": "a", "mid": "a.1", "status": "delivered",
+         "t": 6_000_000},
+        {"event": "msg.received", "node": "b", "mid": "m.4", "t": 3_000_000}]
+    (tmp_path / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    sends = [{"marker": "G%04d" % i, "src": "a", "dst": "b", "cls": "short", "hops": 1,
+              "mid": mid, "t_sent": 2_000_000} for i, mid in enumerate(["a.1", "a.2", "a.3", "m.4"])]
+    logs = rdelivery.read_messages(str(tmp_path))
+    arrivals = rdelivery.read_arrivals(str(tmp_path))
+    out, rows = rdelivery.analyse({"sends": sends}, logs, {}, set(), arrivals)
+    assert [r["delivered"] for r in rows] == [True, True, False, True]
+    assert [r["proven"] for r in rows] == [True, False, False, False]
+    assert out["delivered"] == 3 and out["proven"] == 1 and out["refused"] == 1
+    assert out["proven_of_delivered"] == "1/3 (33.3%)"
+    assert out["latency_s"]["median"] == pytest.approx(2.0)
+
+
 def test_delivery(run, tmp_path):
     drive = {"sends": [
         {"marker": "G0001", "src": "n01", "dst": "n02", "cls": "short", "hops": 1,
@@ -487,8 +518,12 @@ def test_delivery(run, tmp_path):
     code, text = call(delivery.main, [str(path), run.dir, "--json", str(out_json)])
     out = json.loads(text)
     assert code == 0 and out["sent"] == 3 and out["delivered"] == 1 and out["no_mid"] == 1
-    assert out["by_route_hops"] == {"1": "1/1 (100.0%)", "no path": "0/2 (0.0%)"}
-    assert out["latency_s"]["median"] == pytest.approx(2.0)
+    # No arrival reported in this run: delivered is counted by proof.
+    assert not out["arrivals_reported"] and out["proven"] == 1
+    assert out["by_route_hops"] == {
+        "1": {"delivered": "1/1 (100.0%)", "proven": "1/1 (100.0%)"},
+        "no path": {"delivered": "0/2 (0.0%)", "proven": "0/2 (0.0%)"}}
+    assert out["proof_latency_s"]["median"] == pytest.approx(2.0)
     words = dict(out["undelivered_last_word"])
     assert "no mid" in words and any("failed" in w for w in words)
     rows = json.loads(out_json.read_text())["messages"]
@@ -620,6 +655,7 @@ class FakeSim:
                   "hops": 1} for k in range(3)]
         return {"lxmf.identities": [["n%02d" % i, ("%02d" % i) * 16]], "path": table,
                 "lxmf.announce": None, "lxmf.send": "mid-%d" % i,
+                "floodadv": None, "contacts": [["c%d" % k, "ab", 1] for k in range(2)],
                 "diagnostics": {"paths": "3"}}.get(m["verb"])
 
     async def handle(self, request):
@@ -767,6 +803,51 @@ def test_the_traffic_driver_runs_on_a_sim(tmp_path):
         rtraffic.Options(colour="blue")
 
 
+def test_traffic_on_meshcore_goes_between_the_untagged_by_name(tmp_path):
+    names = ["n01", "n02", "n03", "n04", "n05"]
+    fake = FakeSim(names, {n: "meshcore" for n in names})
+    opts = {"category": "auto", "skip_tag": "even", "warm_rounds": 1, "warm_spread": 0,
+            "settle_every": 1, "traffic": 20, "every": 5, "drain": 0,
+            "sizes": {"short": (20, 55, 1)}}
+    result = with_fake_sim(fake, lambda sim: rtraffic.run_on(sim, opts, str(tmp_path / "out.json")))
+    # FakeSim tags every second node `even`: those only forward.
+    assert result["category"] == "meshcore" and result["endpoints"] == ["n01", "n03", "n05"]
+    assert result["dests"] == {"n01": "n01", "n03": "n03", "n05": "n05"}
+    metas = [m for m in fake.got if m["type"] == "meta"]
+    assert [m["verb"] for m in metas[:2]] == ["floodadv", "contacts"]
+    assert all(m["category"] == "meshcore" for m in metas[:2])
+    assert result["warm"]["samples"][-1]["total"] == 6
+    sequences = [m for m in fake.got if m["type"] == "sequence"]
+    assert [s["verb"] for s in sequences[0]["steps"]] == ["path", "msg"]
+    assert sequences[0]["steps"][1]["args"]["to"] in ("n01", "n03", "n05")
+    sends = result["sends"]
+    assert len(sends) == 4 and {s["src"] for s in sends} | {s["dst"] for s in sends} <= \
+        {"n01", "n03", "n05"}
+    assert all(s["cls"] == "short" and 20 <= s["len"] <= 55 and s["hops"] == 0 for s in sends)
+
+
+def test_traffic_takes_the_one_category_and_refuses_a_mix():
+    class Station:
+        def __init__(self, category):
+            self.category = category
+
+    class Sim:
+        stations = {"a": Station("meshtastic"), "b": Station("meshtastic")}
+    assert rtraffic.protocol_of(Sim, ["a", "b"], "auto").category == "meshtastic"
+    assert rtraffic.protocol_of(Sim, ["a", "b"], "reticulum").category == "reticulum"
+    Sim.stations["c"] = Station("meshcore")
+    with pytest.raises(ValueError, match="more than one category.*meshcore c; meshtastic a, b"):
+        rtraffic.protocol_of(Sim, ["a", "b", "c"], "auto")
+    hops = messaging.Meshtastic().hops([["x", 1, 3, 2.5, 0], ["y", 2, 1, 4.0, 0]], "y")
+    assert hops == 1 and messaging.Meshtastic().hops("no list", "y") is None
+    # One message, said once, in each category's own verb.
+    assert [messaging.protocol(c).send("b", "hi") for c in ("reticulum", "meshcore", "meshtastic")] \
+        == [("lxmf.send", {"to": "b", "text": "hi"}), ("msg", {"to": "b", "text": "hi"}),
+            ("sendtext", {"text": "hi", "to": "b"})]
+    with pytest.raises(ValueError, match="no messaging for category 'lora'"):
+        messaging.protocol("lora")
+
+
 def test_a_message_whose_send_fails_is_recorded_so_and_the_rest_go_on(tmp_path):
     """simd answers a request it could not do with the error (a tool that
     gave no answer, say): that message is recorded as failed, and the
@@ -833,6 +914,9 @@ def test_a_script_says_it_synchronously(monkeypatch, tmp_path):
             later = node("n01").reticulum.lxmf.send("n03", "hi", after=5, wait=False)
             assert library.script_results([later]) == [{"n01": "mid-0"}]
             assert node("n02").reticulum.path(to="n03")["n02"][0]["hops"] == 1
+            # Whatever mesh each runs: LXMF from the Reticulum nodes, msg from MeshCore's.
+            said = (node("n01") | node("m04")).message("n03", "hello")
+            assert said["n01"] == "mid-0" and "m04" in said
             nodes().radio(tx_dbm="max")
             assert node("n02").facts()["n02"]["max_dbm"] == 22
             with pytest.raises(library.ScriptError, match="no reticulum node"):
@@ -855,6 +939,9 @@ def test_a_script_says_it_synchronously(monkeypatch, tmp_path):
     sent = [m for m in metas if m["verb"] == "lxmf.send"][0]
     assert sent["args"] == {"to": "n03", "text": "hi"} and sent["after"] == 5
     assert sent["names"] == ["n01"]
+    both = [m for m in metas if m["args"].get("text") == "hello"]
+    assert [(m["verb"], m["category"], m["names"]) for m in both] == [
+        ("msg", "meshcore", ["m04"]), ("lxmf.send", "reticulum", ["n01"])]
     radio = [m for m in metas if m["verb"] == "radio"][0]
     assert radio["args"] == {"tx_dbm": "max"} and "category" not in radio
     logged = (tmp_path / "scripts.log").read_text()
@@ -871,6 +958,15 @@ def test_the_schedule_is_the_seed_s():
 def the_schedule_as_it_was(names, seed, duration, every, marker):
     """traffic.schedule before its variants, word for word."""
     import random
+    classes = ["short"] * 167 + ["two"] * 76 + ["big"] * 39
+
+    def body(rng, cls, marker):
+        n = {"short": rng.randint(20, 55), "two": rng.randint(115, 300)}.get(cls) \
+            or rng.randint(420, 650)
+        text = marker
+        while len(text) < n:
+            text += "-" + rng.choice(rtraffic.WORDS)
+        return text[:n]
     rng = random.Random(seed)
     names = sorted(names)
     out = []
@@ -878,9 +974,8 @@ def the_schedule_as_it_was(names, seed, duration, every, marker):
     while n * every < duration:
         src = rng.choice(names)
         dst = rng.choice([s for s in names if s != src])
-        cls = rng.choice(rtraffic.CLASSES)
-        out.append((n + 1, n * every, src, dst, cls,
-                    rtraffic.body(rng, cls, "%s%04d" % (marker, n + 1))))
+        cls = rng.choice(classes)
+        out.append((n + 1, n * every, src, dst, cls, body(rng, cls, "%s%04d" % (marker, n + 1))))
         n += 1
     return out
 

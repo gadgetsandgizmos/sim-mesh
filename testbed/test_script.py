@@ -47,7 +47,7 @@ def test_a_script_is_described_without_being_run(scripts_dir):
     assert [r["path"] for r in got["references"]] == ["sim_mesh/library.py", "sim_mesh/traffic.py"]
     assert all(r["library"] for r in got["references"])
     assert "line 1" in script.describe(script.script_path("broken"))["error"]
-    assert script.read_reference("sim_mesh/traffic.py").startswith('"""The LXMF traffic driver')
+    assert script.read_reference("sim_mesh/traffic.py").startswith('"""The traffic driver')
     with pytest.raises(store.StoreError):
         script.read_reference("../front.py")
 

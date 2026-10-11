@@ -61,6 +61,21 @@ one to sim-mesh's when it learns it (`lxmf_couple`), and reports what the
 station says of its own id with `lxmf_native`, which holds what comes before
 the coupling and reports it once it is made. What goes wrong before the
 firmware has an id is reported against `mid` directly.
+
+**What arrived** is told apart from what was proven, since a proof is a
+packet back across the mesh and is lost as easily as the message. A driver
+whose firmware says them reports, for each message `lxmf.send` was given,
+its LXMF message id (the 64-hex-digit hash sender and recipient both
+compute), and for each message its station receives, that id:
+
+    self.lxmf_message_id(station, native, message_id)   # lxmf.message.id {mid, message_id}
+    self.lxmf_received(station, message_id, sender=None, refused=None)
+                                    # lxmf.message.received {message_id, sender, refused}
+
+the first under the firmware's own id, coupled as `lxmf_native` is; `refused`
+says why a message that arrived was not taken (a full mailbox). A firmware
+that logs only a prefix of the id gives that: ids are matched on the
+shorter of the two.
 """
 
 from collections import OrderedDict
@@ -70,6 +85,8 @@ from sim_mesh.driver import CommandError, Driver  # noqa: F401 - a driver's impo
 ROLES = ("transport", "client")
 STATUSES = ("pending", "sent", "delivered", "failed")
 EVENT = "lxmf.message.status"
+ID_EVENT = "lxmf.message.id"
+RECEIVED_EVENT = "lxmf.message.received"
 ORPHANS_MAX = 256           # a station's statuses for ids not coupled yet, kept
 
 
@@ -121,7 +138,10 @@ class ReticulumDriver(Driver):
         said of it before now is reported."""
         self.coupled.setdefault(station.name, {})[native] = mid
         for status, why in self.orphans.get(station.name, {}).pop(native, []):
-            self.lxmf_status(station, mid, status, why)
+            if status == ID_EVENT:
+                station.report(ID_EVENT, mid=mid, message_id=why)
+            else:
+                self.lxmf_status(station, mid, status, why)
 
     def lxmf_coupled(self, station, native):
         """sim-mesh's id for the firmware's `native`, or None."""
@@ -139,6 +159,28 @@ class ReticulumDriver(Driver):
         while len(held) > ORPHANS_MAX:
             held.popitem(last=False)
         return False
+
+    def lxmf_message_id(self, station, native, message_id):
+        """The LXMF message id of the station's message `native`: reported
+        as `lxmf.message.id` under sim-mesh's id, or held until the coupling."""
+        mid = self.lxmf_coupled(station, native)
+        if mid is not None:
+            station.report(ID_EVENT, mid=mid, message_id=message_id)
+            return
+        held = self.orphans.setdefault(station.name, OrderedDict())
+        held.setdefault(native, []).append((ID_EVENT, message_id))
+        while len(held) > ORPHANS_MAX:
+            held.popitem(last=False)
+
+    def lxmf_received(self, station, message_id, sender=None, refused=None):
+        """The station received the LXMF message `message_id`; with
+        `refused`, why it did not take it (a full mailbox, say)."""
+        fields = {"message_id": message_id}
+        if sender:
+            fields["sender"] = sender
+        if refused:
+            fields["refused"] = refused
+        station.report(RECEIVED_EVENT, **fields)
 
     def lxmf_uncoupled(self, station):
         """The firmware's ids the station has spoken of that are not coupled

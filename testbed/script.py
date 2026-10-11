@@ -69,7 +69,7 @@ nodes().up()
 GLOBALS = "globals"
 # The scripts sim-mesh ships: never written over, kept changed under a name of
 # one's own (Save as).
-EXAMPLES = ("lxmf-traffic", "meshtastic-check", "realtime", "startup")
+EXAMPLES = ("lxmf-traffic", "msg-traffic", "meshtastic-check", "realtime", "startup")
 # The names of globals.py read outside a script, and what each must be: the
 # radio every station without the `no-radio` tag is set to, which the page's
 # coverage and links, the loss tables' band and the analysis take as given.

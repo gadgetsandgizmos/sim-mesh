@@ -11,8 +11,12 @@ from globals import FREQ_MHZ, SF, BW_KHZ, CR, SYNC
 RADIOS = ~nodes(tag="no-radio")
 
 # A node tagged with a role is told it; nothing to a firmware of another category.
+# A node tagged repeater forwards whatever it runs: Reticulum's transport,
+# Meshtastic's router; MeshCore's repeater is a firmware of its own.
 nodes(tag="transport").on_first_boot(Node.reticulum.role("transport"))
 nodes(tag="router").on_first_boot(Node.meshtastic.role("router"))
+REPEATERS = nodes(tag="repeater")
+REPEATERS.on_first_boot(Node.reticulum.role("transport"), Node.meshtastic.role("router"))
 
 # Every node's radio, bar those tagged no-radio, at the node's own maximum power.
 # Reticulum's sync word is said only to Reticulum nodes: other firmware has

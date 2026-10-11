@@ -80,6 +80,11 @@ to be up first; a node with no firmware refuses):
   wiped, and set up again as on its first boot.
 - `.move(lat, lon, height_m=None)`: one node to another place; its links are
   recomputed.
+- `.message(to, text)`: a direct message from each node to the node `to`,
+  in the node's own protocol, whatever its category (sim_mesh.messaging:
+  `lxmf.send`, `meshcore.msg`, `meshtastic.sendtext`): {node: the
+  message's id}. `.announce()`: each node made known to the others in its
+  own protocol (an LXMF announce, a flood advert, a NodeInfo).
 - `.radio(freq_mhz, sf, bw_khz, cr, tx_dbm, sync, preamble)`: slot 0's
   settings, those given (`tx_dbm="max"` is each node's own maximum);
   `.radio_up()`: the radio started, after whatever it reads when it starts.
@@ -152,6 +157,7 @@ import os
 import textwrap
 import threading
 
+from sim_mesh import messaging
 from sim_mesh import select as select_module
 from sim_mesh import sim as sim_module
 
@@ -791,6 +797,46 @@ class Nodes(select_module.Nodes):
             return _done(self, "%s%s(%s)" % (category + "." if category else "", verb_name, said),
                          results)
         return runtime.call(go(), wait)
+
+    # ---- whatever mesh they run (sim_mesh.messaging) ----------------------
+
+    def _each_protocol(self, step, said, spread, after):
+        """A messaging step done by each node in its own category's verb:
+        the nodes grouped by category, each group given its protocol's
+        (verb, args), the answers merged."""
+        sim = _sim()
+
+        async def go():
+            await sim.settled()
+            by = {}
+            for name in self.pick(sim.facts()):
+                by.setdefault(sim.stations[name].category, []).append(name)
+            if not by:
+                raise ScriptError("%r chooses no node" % (self,))
+            results = {}
+            for category, names in sorted(by.items(), key=lambda kv: str(kv[0])):
+                try:
+                    proto = messaging.protocol(category)
+                except ValueError as err:
+                    raise ScriptError("%s: %s" % (", ".join(names), err)) from None
+                verb_name, args = step(proto)
+                ready = await sim.ready(select_module.Nodes({"names": names}))
+                results.update(await sim.ask(
+                    {"type": "meta", "verb": verb_name, "args": args, "category": category},
+                    ready, spread, after))
+            return _done(self, said, results)
+        return go()
+
+    def message(self, to, text, after=0.0, wait=True):
+        """A direct message from each node to the node `to`, in the node's own
+        protocol: {node: the message's id}."""
+        return runtime.call(self._each_protocol(lambda p: p.send(to, text),
+                                                "message(%r, %r)" % (to, text), 0.0, after), wait)
+
+    def announce(self, spread=0.0, after=0.0, wait=True):
+        """Each node made known to the others, in its own protocol."""
+        return runtime.call(self._each_protocol(lambda p: p.announce(), "announce()",
+                                                spread, after), wait)
 
     # ---- what they are -----------------------------------------------------
 
