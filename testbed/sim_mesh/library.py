@@ -78,6 +78,9 @@ to be up first; a node with no firmware refuses):
   printed}.
 - `.reset()`: reset pressed, its state kept; `.factory_reset()`: its state
   wiped, and set up again as on its first boot.
+- `.power(on)`: the power off, its station stopped where it is until it is
+  powered on, its state kept (nothing flushed, as in a power cut); or on, a
+  stopped station booting from its state (a running one is left as it is).
 - `.move(lat, lon, height_m=None)`: one node to another place; its links are
   recomputed.
 - `.message(to, text)`: a direct message from each node to the node `to`,
@@ -916,6 +919,16 @@ class Nodes(select_module.Nodes):
             names = self._names()
             await sim.nodes(names=names).factory_reset(after)
             return _done(self, "factory_reset()", names)
+        return runtime.call(go(), wait)
+
+    def power(self, on, after=0.0, wait=True):
+        """Each one's power off (on false) or on; see the module's docstring."""
+        sim = _sim()
+
+        async def go():
+            names = self._names()
+            await sim.nodes(names=names).power(bool(on), after)
+            return _done(self, "power(%s)" % bool(on), names)
         return runtime.call(go(), wait)
 
     def move(self, lat, lon, height_m=None, after=0.0, wait=True):

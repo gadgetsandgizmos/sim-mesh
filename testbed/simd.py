@@ -104,6 +104,9 @@ sequence {steps: [command | meta], name? | names? | tag?, base?, after?, id?}
                                                     those one after another at one T, answered
                                                     once with a list of results
 node_reset {name} · node_factory_reset {name} · reset_all · factory_reset_all
+node_stop {name, after?, id?} · node_start {name, after?, id?}
+                                                    power off (stopped until started, state kept,
+                                                    nothing flushed) and on
 start_all · stop_all
 plan {phases: [{name, until}]}                      a driver's phases, T in µs
 script_loglevel {level}                             how much the scripts on it log, unless
@@ -954,24 +957,25 @@ class Simd:
         await asyncio.gather(*(self.stop_station(name, flush=False)
                                for name in list(self.stations)))
 
-    async def leave_together(self):
-        """In a virtual run, every station leaves T at its next barrier: the
-        instant they are all idle and what they said has been taken, before T
-        moves on and before any is sent its next instant. Stopped one by one,
-        on the host's time, the others ran on meanwhile, and how far into the
-        record they got was the host's to say: two runs of one cell parted
-        there. Each is marked stopping, so none that exits before its own
-        stop is started again. Bounded, as every wait of a stop is: a run
-        that reaches no barrier (a driver holding T, a station that never
-        idles) is stopped as before."""
-        if not self.virtual or not self.stations:
+    async def leave_together(self, stations=None):
+        """In a virtual run, every station (or those given) leaves T at its
+        next barrier: the instant they are all idle and what they said has
+        been taken, before T moves on and before any is sent its next instant.
+        Stopped one by one, on the host's time, the others ran on meanwhile,
+        and how far into the record they got was the host's to say: two runs
+        of one cell parted there. Each is marked stopping, so none that exits
+        before its own stop is started again. Bounded, as every wait of a stop
+        is: a run that reaches no barrier (a driver holding T, a station that
+        never idles) is stopped as before."""
+        leaving = list(self.stations.values() if stations is None else stations)
+        if not self.virtual or not leaving:
             return
         reached = asyncio.get_running_loop().create_future()
 
         def barrier():
             if reached.done():
                 return
-            for station in self.stations.values():
+            for station in leaving:
                 station.stopping = True
                 station.leave()
             reached.set_result(None)
@@ -1510,6 +1514,43 @@ class Simd:
         else:
             await self.flush_station(station)
             await station.restart()
+
+    async def do_node_stop(self, msg):
+        """Power off: the station stops and stays stopped until `node_start`.
+        The node stays in the nodeset and the medium, which hears nothing from
+        it meanwhile. Nothing is flushed, as nothing is when the power goes:
+        it comes back with what its store holds. In a virtual run it leaves T
+        at the next barrier (leave_together), at the instant the message is
+        acted on (`after`), so the cut is the same in every run."""
+        self.need_run()
+        name = msg["name"]
+        self.nodeset.node(name)
+        station = self.stations.get(name)
+        if station is not None:
+            self.station_event(station, "power", {"on": False})
+            log("%s powered off at t %.6f s" % (name, self.ether.now() / 1e6))
+            await self.leave_together([station])
+            await self.stop_station(name, flush=False)
+            self.broadcast(self.node_message(name))
+        if msg.get("id") is not None:
+            self.answered(msg, {name: "off"})
+
+    async def do_node_start(self, msg):
+        """Power on a node whose station is stopped: it boots from its state,
+        as after a power cut (or set up afresh where it has none), and T waits
+        for it from this instant (Station.run). A running station is left as
+        it is: pressing reset is `node_reset`."""
+        self.need_run()
+        name = msg["name"]
+        self.nodeset.node(name)
+        if name not in self.stations:
+            log("%s powered on at t %.6f s" % (name, self.ether.now() / 1e6))
+            await self.start_station(name)
+            station = self.stations.get(name)
+            if station is not None:
+                self.station_event(station, "power", {"on": True})
+        if msg.get("id") is not None:
+            self.answered(msg, {name: "on" if name in self.stations else "nothing to run"})
 
     async def do_node_factory_reset(self, msg):
         """Throw away a station's state and start it again, set up afresh.
