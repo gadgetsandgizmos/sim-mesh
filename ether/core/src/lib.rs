@@ -364,6 +364,9 @@ struct State {
     expected: BTreeSet<i64>,
     busy_count: i64,
     pending: Vec<Held>,
+    /// Datagrams naming a station from an address other than the one it
+    /// said hello from, dropped (`datagram`).
+    strangers: i64,
     arrivals: u64,
     holds: i64,
     unread: i64,
@@ -551,6 +554,34 @@ impl Core {
         if let Some(obj) = parsed.as_ref().and_then(Value::as_object) {
             let sid = obj.get("sid").and_then(as_int);
             let kind = obj.get("type").and_then(Value::as_str);
+            // A station's radio speaks from the address it said hello from (the
+            // time shim's wrote and listen have a socket of their own); a
+            // restarted one says hello again, from its new one. Anything else
+            // naming it is another's: on a shared host the stations of a run
+            // whose ether is gone go on writing to its port, and once a new
+            // run's ether has it their idles pass for its stations' (an idle a
+            // station never said, a resend at the wall clock's moment).
+            if let Some(sid) =
+                sid.filter(|_| matches!(kind, Some("idle" | "state" | "tx" | "floor")))
+            {
+                let mut s = self.s.borrow_mut();
+                if s.stations.get(&sid).is_some_and(|st| st.addr != addr) {
+                    s.strangers += 1;
+                    let first = s.strangers == 1;
+                    drop(s);
+                    if first {
+                        self.log(
+                            py,
+                            format!(
+                                "ether: a datagram for station {} from {}, not the address it said \
+                                 hello from: dropped, as is any other (another run's station?)",
+                                sid, addr
+                            ),
+                        )?;
+                    }
+                    return Ok(());
+                }
+            }
             match (kind, sid) {
                 (Some("idle"), Some(sid)) => {
                     let seq = obj.get("seq").and_then(as_int);
@@ -887,6 +918,7 @@ impl Core {
                 expected: BTreeSet::new(),
                 busy_count: 0,
                 pending: Vec::new(),
+                strangers: 0,
                 arrivals: 0,
                 holds: 0,
                 unread: 0,
@@ -1005,6 +1037,12 @@ impl Core {
     #[getter]
     fn holds(&self) -> i64 {
         self.s.borrow().holds
+    }
+
+    /// How many datagrams named a station from an address not its own.
+    #[getter]
+    fn strangers(&self) -> i64 {
+        self.s.borrow().strangers
     }
 
     #[setter]

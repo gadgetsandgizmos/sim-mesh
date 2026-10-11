@@ -2602,6 +2602,8 @@ The ether is the medium between stations: it decides who hears each frame,
 from the run's loss tables, and in a virtual-time run it owns time. A
 station speaks to it over UDP, one JSON object per datagram, from a socket
 bound to its own address; payloads are base64, times in microseconds. The
+ether takes a station's `idle`, `state`, `tx` and `floor` only from the
+address it said `hello` from, and drops any other naming it. The
 virtual radio (§9) speaks it for a firmware; a firmware **may** speak it
 itself ([`ether/README.md`](ether/README.md) has the whole of it).
 

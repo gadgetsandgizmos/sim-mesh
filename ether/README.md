@@ -376,6 +376,15 @@ The `id` in a `tx` is the transmitter's own count of its frames; the `id` in an
 receiver has to be able to tell two frames apart while both are in the air, and
 the number the transmitter gave each of them cannot do that.
 
+**A station speaks from the address it said `hello` from.** The ether takes
+`idle`, `state`, `tx` and `floor` for a station only from that address; a
+restarted station says `hello` again, from its new one. Anything else naming
+the station is dropped, the first such datagram is logged, and the core
+counts them (`strangers`). On a shared host, the stations of a run whose
+ether is gone go on writing to its port, and without this their idles would
+pass for a new run's stations' once its ether had the port. The time shim's
+`wrote` and `listen` come from sockets of their own and are not held to it.
+
 ### Virtual time
 
 `--time max` runs T as fast as the stations allow, `--time <k>x` paces it at
