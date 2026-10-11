@@ -324,9 +324,8 @@ writer → ether    wrote {ch: "tcp/A>B", n: 207, go: 4}   from the writing thre
 ether → reader    run {t: T, seq: 12}                    the reader had an older T
 reader → ether    idle {seq: 12, …}
 ether → writer    go {go: 4}                             the run is quiet; lowest station first
-reader → ether    read {ch: "tcp/A>B", n: 207}           T has waited for this
-ether → reader    run {t: T, seq: 13}                    at work on it, at the T it has
-reader → ether    idle {seq: 13, …}
+reader → ether    read {ch: "tcp/A>B", n: 207}           T has waited for this; at work on it now
+reader → ether    idle {seq: 12, …, n: 5}                done with it, at the T it has
 station → ether   read {ch: "tty", total: 36}            the console, typed by the testbed
 ```
 
@@ -345,8 +344,8 @@ learns where it is.
 | `hello` | this station exists, and which radio slots it has; `"lines": 1`, it takes several messages to a datagram |
 | `state` | a slot's mode, modulation and carrier — the ether matches on these |
 | `tx` | a transmission: its modulation, carrier and power, its three instants, and its payload |
-| `idle` | virtual time: the station has done everything the message numbered `seq` gave it to do, and next needs to run at T `until` (`null`: not on its own) |
-| `read` | virtual time: bytes it took in from outside the air — `"ch": "tty", "total": N`, its console, a running total; `"ch": "tcp/A>B", "n": N`, a TCP connection from another station |
+| `idle` | virtual time: the station has done everything the message numbered `seq` gave it to do, and next needs to run at T `until` (`null`: not on its own); `n`, the station's own count of its idles, which a copy of one keeps |
+| `read` | virtual time: bytes it took in from outside the air — `"ch": "tty", "total": N`, its console, a running total; `"ch": "tcp/A>B", "n": N`, a TCP connection from another station. It counts as the station speaking: it owes an idle for the work it does on them |
 | `wrote` | virtual time: `"ch": "tcp/A>B", "n": N`, bytes it is about to write to another station; with `"go": k`, sent from the writing thread's own socket, which waits for the `go` |
 | `listen` | virtual time: `"at": "addr:port"`, a TCP endpoint it listens on, whose connections are its own |
 
@@ -364,7 +363,7 @@ per detector, in the radio's own order; a radio without them leaves it out.
 | `welcome` | joined: `t`, the ether's clock now; `mode`, `real` or `virtual`; `rate`, how many times the wall clock a virtual run is paced at (`null`: as fast as it goes); `epoch`, the wall-clock microseconds T 0 stands for; and `seed` |
 | `rx_begin` | a frame is arriving: when its preamble, header and end fall, and how strongly; `"cad": true` when it is energy to this station, not a frame to demodulate — always so in CAD, and in RX when the receiver does not lock on to it; `"hdr_ok": false` when its header will fail at `t_hdr`; `det`, from 1, the side detector that found it, absent for the main one |
 | `rx_end` | that frame is over: the verdict (`clean`, `crc`, or `hdr` at `t_hdr` for a header that failed), why when not clean (`cause`), the payload, RSSI and SNR |
-| `run` | virtual time: T has reached the instant this station asked for; or, at the T it has, it has input to work on and owes an idle for it |
+| `run` | virtual time: T has reached the instant this station asked for; or it is told the run's T before input reaches it |
 | `go` | virtual time, to the socket a `wrote` with `go` came from: that write may go ahead |
 
 A station's `t0`, `t_pre`, `t_hdr` and `t_end` are its own clock in real time
@@ -406,8 +405,9 @@ sends — a `state`, a `tx`, a second `hello` — means it is not idle.
   and so, now and then, did a run.
 - **Input from outside the air lands at an instant.** A station with bytes
   it has not read — typed at its console, written to it over TCP by another
-  station — holds T until its `read` says it has them, and is then sent a
-  `run` at the T it has. A station about to write to another over TCP asks
+  station — holds T until its `read` says it has them. The `read` counts as
+  the station speaking: it is at work on them at the T it has, and owes an
+  idle for that work. A station about to write to another over TCP asks
   first (`wrote` with `go`); asks are answered when nothing else in the run
   is at work, in station order, once the reader has been told T.
 - **A `tx` stamped before T** came from a station that acted on something from
@@ -437,6 +437,13 @@ after 20 ms of wall time with nothing to show for it (the busy watchdog in
 threads is computing (the time shim, [`../radio/shim/simclock.c`](../radio/shim/simclock.c)).
 Bytes a reader has not taken a second of wall time after they were written let
 go of T too, and the ether logs the channel.
+
+Under **strict time**, `SIM_MESH_STRICT_TIME=1` in the environment of the ether
+and its stations, neither lets go on the wall clock: the watchdog answers only
+once none of the station's threads is running, and a reader is waited for
+however long its host takes. A station that never stops working then stops
+the run, and says so every 10 s of wall time
+([`../INTERNALS.md`](../INTERNALS.md#time), *Strict time*).
 
 ## The record
 

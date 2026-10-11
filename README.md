@@ -1657,8 +1657,11 @@ line or framed RPC query typed at a console (and the next one, typed when
 the reply to it is read), a TCP (Transmission Control Protocol) write from
 one station to another, and work a station spends more than a tick of the
 host's time on. So with the same `--seed` and `--epoch`, two runs of the same
-geodata, nodeset and script put the same frames on the air at the same T. A
-station's TCP CLI or web UI reached from outside the run, and whatever a
+geodata, nodeset and script put the same frames on the air at the same T,
+as long as no station works past the busy watchdog or busy-waits on the
+clock; with `SIM_MESH_STRICT_TIME=1` in the environment sim-mesh runs in,
+those too stop depending on the host's speed ([the firmware
+contract](#5-time), *Strict time*). A station's TCP CLI or web UI reached from outside the run, and whatever a
 person does, still arrives at whatever T the run has reached; a driver that
 means to act at an instant of the run asks simd to wait on T first (`after`,
 [below](#the-control-websocket)).
@@ -2294,6 +2297,7 @@ the driver's `env`.
 | `LD_PRELOAD` | virtual time: the time shim, `libsimclock.so` (§5) |
 | `SIM_MESH_IDLE` | set by a driver whose station does not call `simradio_idle()` itself: `threads`, and the shim says the station is idle when every thread is blocked |
 | `SIM_MESH_CLOCK_PROFILE` | optional, from node.yaml's `env`, or from simd's `--clock-ppm` (a crystal off by a draw within that many parts per million, per station), node.yaml's winning: node time as a function of T, `T:node,T:node,…` in microseconds, both increasing, slope 1 outside the points; absent, node time is T |
+| `SIM_MESH_STRICT_TIME` | optional: `1` in the environment sim-mesh runs in, which its ether reads and its stations inherit, for strict time (§5) |
 
 A station reads its identity from these and from nowhere else, so two
 stations on one host never collide. **A station never learns where it
@@ -2361,8 +2365,25 @@ ether owns conductor time T and moves it only when every station is idle
 - **It reads its console and talks TCP to other stations through the C
   library**: `read` on descriptor 0, and `read`/`recv`/`send`/`write` on its
   sockets. The shim counts those bytes for the ether, which holds T until a
-  station has read what it was sent. Input taken another way holds T a
-  second of wall time each time.
+  station has read what it was sent; a station that has read its input owes
+  an idle for the work it does on it. Input taken another way holds T a
+  second of wall time each time, or, under strict time, for good.
+
+**Strict time.** Ordinarily the host's speed can still leak into a run: a
+station that stays busy past the watchdog has T moved under it by however
+long this host took, and two runs part there. With `SIM_MESH_STRICT_TIME=1`
+nothing on the wall clock decides where T goes, and two runs given the same
+seed and epoch match line for line:
+
+- the watchdog answers for a station only once none of its threads is
+  running; one still at work holds T however long it takes, and one that
+  never stops stops the run, saying so every 10 s of wall time;
+- a thread that waits for time by reading the clock in a loop sees T move:
+  its 100 000th read of one instant first sleeps until the next whole
+  millisecond of node time (or the chips' next event, with
+  `SIM_MESH_SHORT_WAITS=chip`), and while it goes on waiting each next
+  instant takes 1 000 reads;
+- input a station has not read holds T however long its host takes.
 
 In return, nothing the ether says reaches the host piecemeal. The radio
 library applies a datagram whole, the chip's own timers running as T moves,
@@ -2630,15 +2651,15 @@ receiver → ether  idle {seq: 7, until: …}
 | `hello` | this station exists, and which radio slots it has; `"lines": 1`, it takes several messages to a datagram: in a virtual-time run it is sent every message the barrier has for it at one go |
 | `state` | a slot's mode (`RX`, `TX`, `CAD`, `STDBY_RC`, `SLEEP` …), its modulation `mod` and its carrier: the ether matches receivers on these |
 | `tx` | a transmission: its modulation and carrier, its power at the connector, its instants (start, end of preamble, of header, end), its payload |
-| `idle` | virtual time: done with everything message `seq` gave it; next needs to run at T `until` (null: not on its own) |
-| `read`, `wrote`, `listen` | virtual time: bytes taken from its console or from another station over TCP, about to be written to one (with `go`: waits for the ether's `go`), and a TCP endpoint it listens on; the time shim sends these |
+| `idle` | virtual time: done with everything message `seq` gave it; next needs to run at T `until` (null: not on its own); `n`, the station's own count of its idles |
+| `read`, `wrote`, `listen` | virtual time: bytes taken from its console or from another station over TCP, about to be written to one (with `go`: waits for the ether's `go`), and a TCP endpoint it listens on; the time shim sends these. A `read` counts as the station speaking: it owes an idle for the work it does on what it read |
 
 | Ether → station | Says |
 |---|---|
 | `welcome` | joined: `t`, `mode` (`real` or `virtual`), `rate`, `epoch`, `seed` |
 | `rx_begin` | a frame is arriving: its instants and its level; `cad: true` when it is energy to this station, not a frame to demodulate; `hdr_ok: false` when its header will fail at `t_hdr`, where the chip raises a header error and lets go; `det`, from 1, the side detector that found it |
 | `rx_end` | that frame is over: the verdict (`clean`, `crc`, or `hdr` at `t_hdr`), why when not clean (`cause`: `noise`, `interference`, `talked_over`, `lost`; for the record, ignored by the station), the payload, RSSI and SNR |
-| `run` | virtual time: T has reached what this station asked for, or it has input to work on |
+| `run` | virtual time: T has reached what this station asked for, or it is told the run's T before input reaches it |
 | `go` | virtual time: a TCP write asked for may go ahead |
 
 - **`mod`** is the modulation; a receiver hears only a frame in its own. The
@@ -2655,7 +2676,9 @@ receiver → ether  idle {seq: 7, until: …}
   and messages are applied strictly in `seq` order, never twice. T moves
   only when every station is idle, to the earliest of their `until`s and the
   air's next instant. An idle is said again every 250 ms of wall time until
-  something comes back; the ether answers an idle for an older `seq` said
+  something comes back, keeping its `n`, and the ether takes a copy of the
+  idle it already has for the current message for nothing, even after the
+  station has said something since; the ether answers an idle for an older `seq` said
   twice by sending what came after it again. A station that says `hello`
   again has restarted.
 - Unknown message types are ignored, on both sides.
