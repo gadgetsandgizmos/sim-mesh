@@ -1768,6 +1768,37 @@ then takes no T, the same in every run; the `clock` message counts idles that
 took the watchdog's time as `slow_idles`, and simd logs the stations
 concerned when the run's pace drops below 2x.
 
+**Strict time** (`SIM_MESH_STRICT_TIME=1`) takes the wall clock out of every
+one of those answers, so that how fast this host is never decides where T
+goes. A station busy past the watchdog for a while (a proof of work, an LXMF
+stamp) had T moved under it by however long the host took: in a mixed city
+run one stamp took 0 ms of T in one run and 10 ms in the other, and the runs
+parted from that frame on. Under strict time:
+
+- **The watchdog answers only once none of the station's threads is
+  running** (no task of it in `/proc`'s state R), looking again every grace
+  and saying so every 10 s of wall time. A station whose threads all sleep,
+  in waits the census cannot see, is idle whenever the host gets to it, at
+  the same T, so answering for it changes nothing. One that never stops
+  running stops the run.
+- **A thread that waits for time by reading the clock sees T move.** It
+  never stops running, so T would wait for it while it waited for T. Its
+  100 000th read of one instant first sleeps the shortest sleep there is,
+  which the shim ends at the next whole millisecond of node time (or the
+  chips' next event, with `SIM_MESH_SHORT_WAITS=chip`), and the read answers
+  after it; while it goes on waiting there, each next instant takes 1 000
+  reads. Work that reads one instant fewer times takes no T, and work that
+  never reads the clock holds T until it is done. A hundred thousand is
+  above what a working loop of reticulum's stations reads in a city run (a
+  thousand was reached), and a loop waiting on the clock passes it in a
+  fraction of a second; 1 000 reads a step keeps each step's barrier cheap,
+  where 100 000 made a tool waiting on the wall clock give up mid-turn. The
+  rule is the conductor's `readNowUs`, behind `simradio_node_us` and behind
+  the shim's clocks (`read_us` in `simclock_ops`); the thread that applies
+  the ether's grants never sleeps there, since only it moves T.
+- **Unread input holds T however long the reader's host takes**: the ether's
+  second of grace for a channel nobody reads is off.
+
 **What comes from outside the run lands at an instant of T.** The ether
 turns everything that can wake a station other than its own messages into an
 instant ([`ether/INTERNALS.md`](ether/INTERNALS.md#what-does-not-come-over-the-air)):
@@ -1776,12 +1807,19 @@ instant ([`ether/INTERNALS.md`](ether/INTERNALS.md#what-does-not-come-over-the-a
 testbed      sleep ends at T; T holds until what it woke has run
 testbed      typed(sid, n) — T waits;  sync(sid) — station told T, idle
 testbed      writes the pty;  station reads, shim → ether  read {tty, total}
-ether        run {t: the station's T} — it owes an idle for that work
+ether        the read is the station speaking — it owes an idle for that work
 station      prints a reply, idles;  testbed reads every pty that ran, then T moves
 writer       shim → ether  wrote {tcp/A>B, n, go}, waits
 ether        quiet: reader told T, then  go  (lowest station first)
-reader       reads, shim → ether  read {tcp/A>B, n};  ether → reader  run
+reader       reads, shim → ether  read {tcp/A>B, n};  it owes an idle
 ```
+
+A read is the station speaking, the same as a `state` or a `tx`: the shim's
+report marks it busy at the conductor (`spoke`) and at the ether, and the
+station says its idle once the work is done. A `run` sent to it for the
+purpose would land at the host's moment, in the middle of that work: a
+reticulous station took it as an interrupt at a host-paced point, and the
+round robin among its tasks of one priority moved.
 
 The shim does the station's side of it, with no help from the firmware: it
 counts what `read` takes from descriptor 0 and reports the running total once

@@ -13,7 +13,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
@@ -36,6 +38,28 @@ constexpr long kBusyGraceNs = 20 * 1000 * 1000;
  * (resendIdle in the header). */
 constexpr long kResendNs = 250 * 1000 * 1000;
 
+/* Strict time (SIM_MESH_STRICT_TIME=1): the busy grace never answers for a
+ * station still at work. Without it, a station busy past the grace in wall
+ * time (a proof of work, a spin) has T moved under it by however long this
+ * host took, and two runs of one package part there. With it, the grace
+ * answers only once none of the station's threads is running: one asleep in
+ * a wait the census cannot see is idle, and is answered as before, at the
+ * same T whenever the host gets to it. A thread that never stops running
+ * stops the run, and says so every kStrictSayS of wall time. */
+constexpr long kStrictSayS = 10;
+
+/* Strict time: how many reads of one instant make a thread one that waits for
+ * the clock to move (readNowUs). Handling a packet or an event reads the clock
+ * a few times, and at a thousand a working loop of reticulum's stations
+ * already reached it in a city run; a loop that waits on the clock reaches a
+ * hundred thousand in a fraction of a second of the host's time. Once a
+ * thread has been found so, kSpinStepReads reads of each next instant are
+ * enough while it goes on waiting there: each step of T costs the run a
+ * barrier, and a hundred thousand reads a step made a tool waiting on the
+ * wall clock give up on a station mid-turn. */
+constexpr int kSpinReads = 100000;
+constexpr int kSpinStepReads = 1000;
+
 std::atomic<int>     s_mode{-1};
 std::atomic<int64_t> s_T{0};
 std::atomic<int64_t> s_epoch{0};
@@ -44,13 +68,16 @@ std::atomic<int64_t> s_nodeAtJoin{0};
 std::atomic<uint64_t> s_seq{0};
 std::atomic<bool>    s_owed{false};
 std::atomic<bool>    s_resending{false};   /* an idle is out and nothing has come back */
+std::atomic<int64_t> s_armedUs{0};         /* wall clock when the busy grace was armed */
 std::atomic<int64_t> s_until{kNever};
 std::atomic<int64_t> s_chipNext{kNever};   /* the earliest armed timer, in T */
 std::atomic<int64_t> s_lastUntil{kNever};
-void               (*s_sendIdle)(uint64_t, int64_t) = nullptr;
+void               (*s_sendIdle)(uint64_t, int64_t, uint64_t) = nullptr;
+std::atomic<uint64_t> s_idleN{0};          /* idles said; one said again keeps its number */
 std::atomic<void (*)(void)> s_onAdvance{nullptr};
 std::atomic<bool>    s_holding{false};  /* a datagram is being applied (hold) */
 bool                 s_hookOwed = false; /* T moved during it; under B()->lock() */
+thread_local bool    t_grants = false;   /* this thread applies the ether's grants */
 int                  s_tfd = -1;
 
 /* The real wall clock, past the time shim. */
@@ -201,10 +228,54 @@ int spawnReader(int fd, void (*onDatagram)(const char*, size_t))
 
 void armWatchdog()
 {
+    s_armedUs.store(rawWallUs());
     if (s_tfd < 0) return;
     struct itimerspec its = {};
     its.it_value.tv_nsec = kBusyGraceNs;
     timerfd_settime(s_tfd, 0, &its, nullptr);
+}
+
+bool strictTime()
+{
+    static const bool on = [] {
+        const char* e = getenv("SIM_MESH_STRICT_TIME");
+        return e && *e == '1';
+    }();
+    return on;
+}
+
+/* Strict time, a station still at work: look again a grace on. */
+void armStrictLook()
+{
+    if (s_tfd < 0) return;
+    struct itimerspec its = {};
+    its.it_value.tv_nsec = kBusyGraceNs;
+    timerfd_settime(s_tfd, 0, &its, nullptr);
+}
+
+/* Is any thread of this station but the asking one running, or ready to?
+ * /proc's state R; a thread asleep, in any wait, is not at work. */
+bool othersRunning()
+{
+    pid_t self = (pid_t)syscall(SYS_gettid);
+    DIR* d = opendir("/proc/self/task");
+    if (!d) return true;   /* cannot tell: hold T, as strict time does */
+    bool any = false;
+    while (struct dirent* e = readdir(d)) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9' || atoi(e->d_name) == self) continue;
+        char path[300], buf[512];
+        snprintf(path, sizeof path, "/proc/self/task/%s/stat", e->d_name);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = 0;
+        const char* r = strrchr(buf, ')');   /* the name may hold spaces and parentheses */
+        if (r && r[1] == ' ' && r[2] == 'R') { any = true; break; }
+    }
+    closedir(d);
+    return any;
 }
 
 /* After an idle: the timer says it again kResendNs on unless the ether has
@@ -221,7 +292,8 @@ void armResend()
 void sendIdleNow(int64_t until)
 {
     s_lastUntil.store(until);
-    if (s_sendIdle) s_sendIdle(s_seq.load(), until);
+    uint64_t n = s_idleN.fetch_add(1) + 1;
+    if (s_sendIdle) s_sendIdle(s_seq.load(), until, n);
 }
 
 void* watchdogMain(void*)
@@ -232,11 +304,22 @@ void* watchdogMain(void*)
     for (;;) {
         uint64_t n;
         if (read(s_tfd, &n, sizeof n) != (ssize_t)sizeof n) continue;
+        if (strictTime() && s_owed.load() && othersRunning()) {
+            static int64_t said = 0;
+            int64_t now = rawWallUs(), busy = (now - s_armedUs.load()) / 1000000;
+            if (busy >= kStrictSayS && now - said >= kStrictSayS * 1000000) {
+                said = now;
+                B()->log(SIMRADIO_LOG_WARN, "conductor: at work %lld s of wall time on one grant, "
+                         "and strict time holds T for it", (long long)busy);
+            }
+            armStrictLook();
+            continue;
+        }
         if (s_owed.exchange(false)) {
             sendIdleNow(s_until.load());
             armResend();
         } else if (s_resending.load()) {
-            if (s_sendIdle) s_sendIdle(s_seq.load(), s_lastUntil.load());
+            if (s_sendIdle) s_sendIdle(s_seq.load(), s_lastUntil.load(), s_idleN.load());
             armResend();
         }
     }
@@ -269,7 +352,58 @@ void startWatchdog()
 
 /* ---- The time shim ---- */
 
+/* Node time as the station's own code reads it: simradio_node_us, and the
+ * clocks the time shim answers. Under strict time T moves only when the
+ * station is idle, and a thread that waits for time by reading the clock in a
+ * loop never is: T would wait for it, and it for T. So a thread's
+ * kSpinReads-th read of one instant first sleeps the shortest sleep there is,
+ * which the time shim ends at the next instant a wait can end on: the next
+ * whole millisecond of node time, or the chips' next event before it with
+ * SIM_MESH_SHORT_WAITS=chip. While each of its instants ends in such a
+ * sleep, kSpinStepReads reads of the next one do too; one that ends any other
+ * way (the thread waited elsewhere) takes kSpinReads again. When a thread
+ * waits, and what it reads, then follow from its own reads alone, never from
+ * the host's pace: work that
+ * reads the clock fewer times at one instant takes no time of T's, as before,
+ * and work that never reads it holds T until it is done. The thread that
+ * applies the ether's grants never sleeps here, since only it moves T. */
+int64_t readNowUs()
+{
+    int64_t now = nodeNowUs();
+    if (!strictTime() || !isVirtual() || t_grants || !s_joined.load()) return now;
+    static thread_local int64_t last = -1;
+    static thread_local int same = 0;
+    static thread_local bool waiting = false;   /* its last instant ended in a sleep here */
+    if (now != last) {
+        last = now;
+        same = 0;
+        waiting = false;
+        return now;
+    }
+    if (++same < (waiting ? kSpinStepReads : kSpinReads)) return now;
+    same = 0;              /* the log below reads the clock too */
+    static thread_local bool said = false;
+    if (!said) {
+        said = true;
+        B()->log(SIMRADIO_LOG_WARN, "conductor: a thread read node time %d times at %lld us; "
+                 "strict time sleeps it until the next instant a wait ends on (said once a thread)",
+                 kSpinReads, (long long)now);
+    }
+    usleep(1);
+    now = nodeNowUs();
+    if (now != last) {
+        last = now;
+        same = 0;
+        waiting = true;
+    } else {
+        same = kSpinReads - 1;   /* a signal ended the sleep: the next read sleeps again */
+    }
+    return now;
+}
+
 int64_t opsNodeUs() { return nodeNowUs(); }
+int64_t opsReadUs() { return readNowUs(); }
+void    opsSpoke() { spoke(); }
 int64_t opsEpochUs() { return epochUs(); }
 int     opsWakeCreate(void (*due)(void*), void* arg) { return wakeCreate(due, arg); }
 void    opsWakeAt(int w, int64_t node) { wakeAt(w, node); }
@@ -287,7 +421,7 @@ int64_t opsChipNextUs()
 }
 
 const struct simclock_ops kOps = { opsNodeUs, opsEpochUs, opsWakeCreate, opsWakeAt, opsIdle,
-                                   opsChipNextUs };
+                                   opsChipNextUs, opsSpoke, opsReadUs };
 
 void attachShim()
 {
@@ -408,6 +542,7 @@ void runDue()
 void advanceTo(int64_t t)
 {
     if (!isVirtual()) return;
+    t_grants = true;
     B()->lock();
     bool moved = t > s_T.load();
     if (moved) s_T.store(t);
@@ -421,6 +556,7 @@ void advanceTo(int64_t t)
 
 void hold()
 {
+    t_grants = true;
     s_holding.store(true);
 }
 
@@ -477,7 +613,7 @@ uint64_t lastSeq() { return s_seq.load(); }
 void resendIdle()
 {
     if (!isVirtual() || !s_joined.load() || !s_sendIdle) return;
-    s_sendIdle(s_seq.load(), s_lastUntil.load());
+    s_sendIdle(s_seq.load(), s_lastUntil.load(), s_idleN.load());
 }
 
 int wakeCreate(void (*due)(void*), void* arg)
@@ -512,7 +648,7 @@ void idle()
     }
 }
 
-void setIdleSender(void (*send)(uint64_t, int64_t))
+void setIdleSender(void (*send)(uint64_t, int64_t, uint64_t))
 {
     s_sendIdle = send;
 }
@@ -532,7 +668,7 @@ void start()
 }  // namespace conductor
 
 extern "C" int simradio_virtual(void) { return conductor::isVirtual() ? 1 : 0; }
-extern "C" int64_t simradio_node_us(void) { return conductor::nodeNowUs(); }
+extern "C" int64_t simradio_node_us(void) { return conductor::readNowUs(); }
 extern "C" int64_t simradio_epoch_us(void) { return conductor::epochUs(); }
 extern "C" int64_t simradio_node_to_conductor(int64_t node) { return conductor::conductorOf(node); }
 extern "C" int simradio_wake_create(void (*due)(void*), void* arg) { return conductor::wakeCreate(due, arg); }

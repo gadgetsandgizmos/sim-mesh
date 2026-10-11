@@ -283,6 +283,9 @@ RESEND_GAP_S = 0.1
 # A reader that has not, this long in wall time after they were written, is
 # not waiting for them; the channel lets go of T and says so.
 UNREAD_GRACE_S = 1.0
+# Strict time (SIM_MESH_STRICT_TIME=1): nothing on the wall clock decides
+# where T goes, so a reader is waited for however long its host takes.
+STRICT_TIME = os.environ.get("SIM_MESH_STRICT_TIME", "") == "1"
 
 # How many turns of the event loop `settle()` waits, at most, for the loop to
 # have nothing else ready.
@@ -1399,7 +1402,8 @@ class Ether(asyncio.DatagramProtocol):
         now = channel.holding()
         if now and not was:
             self.unread += 1
-            channel.timer = self.loop.call_later(UNREAD_GRACE_S, self.unread_grace, channel)
+            if not STRICT_TIME:
+                channel.timer = self.loop.call_later(UNREAD_GRACE_S, self.unread_grace, channel)
         elif was and not now:
             self.unread -= 1
             if channel.timer is not None:
@@ -1408,9 +1412,13 @@ class Ether(asyncio.DatagramProtocol):
         if not totals and channel.written == channel.taken:
             self.channels.pop(channel.key, None)
         if took and was and not now:
+            # The reader owes an idle for its input already: its report
+            # counts as it speaking, and its idle comes once that work is
+            # done. A message sent to it for the purpose would land at the
+            # host's moment, in the middle of that work.
             reader = self.stations.get(channel.reader)
             if reader is not None:
-                self.send(channel.reader, {"type": "run", "t": reader.told})
+                self.mark(reader, False)
         self.kick()
 
     def unread_grace(self, channel):

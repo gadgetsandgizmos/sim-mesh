@@ -338,3 +338,56 @@ def test_the_shim_counts_console_and_tcp_bytes_and_waits_to_write():
         station.close()
         peer.close()
         ether.close()
+
+
+# ---- A busy-wait on the clock, under strict time --------------------------
+#
+# With SIM_MESH_STRICT_TIME=1, T moves only when the station is idle, and a
+# thread that waits for time by reading the clock in a loop never is. Its
+# 100 000th read of one instant sleeps the shortest sleep there is, which ends
+# on the next whole millisecond of node time, and while it goes on waiting so
+# its 1 000th read of each next instant does: the loop sees T move a
+# millisecond at a time, at a cost in reads that is the loop's own, never the
+# host's pace.
+
+SPINNER = os.path.join(BUILD, "spinner")
+
+
+def spin(**extra):
+    """Run the spinner, granting T as the ether does, and return the instants
+    it asked for and its `done` line."""
+    build_standin(SPINNER)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(3.0)
+    station = Station(sock.getsockname()[1], program=SPINNER, **extra)
+    try:
+        _, addr = sock.recvfrom(65535)
+        t, seq, untils = 0, 1, []
+        sock.sendto(json.dumps({"type": "welcome", "t": t, "mode": "virtual", "rate": None,
+                                "epoch": EPOCH, "seq": seq}).encode(), addr)
+        while True:
+            msgs = [json.loads(line) for line in sock.recvfrom(65535)[0].split(b"\n") if line]
+            idles = [m for m in msgs if m["type"] == "idle" and m["seq"] == seq]
+            if not idles:
+                continue
+            if idles[0]["until"] is None:
+                break
+            t, seq = idles[0]["until"], seq + 1
+            untils.append(t)
+            sock.sendto(json.dumps({"type": "run", "t": t, "seq": seq}).encode(), addr)
+        station.pump(0.2)
+        return untils, [line for line in station.lines if line[0] == "done"]
+    finally:
+        station.close()
+        sock.close()
+
+
+def test_under_strict_time_a_busy_wait_on_the_clock_moves_t_by_the_millisecond():
+    untils, done = spin(SIM_MESH_STRICT_TIME="1")
+    assert untils == [1000 * i for i in range(1, 7)]
+    # The read that slept from 5 ms returned 6 ms, the first past 5.3 ms: one
+    # read at the welcome's instant, 100 000 to the first millisecond, then
+    # 1 000 per millisecond.
+    assert done == [["done", "6000", str(1 + 100_000 + 5 * 1_000)]]
+    assert spin(SIM_MESH_STRICT_TIME="1") == (untils, done)

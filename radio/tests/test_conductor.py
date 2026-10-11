@@ -737,6 +737,12 @@ def test_with_busy_tcxo_a_set_tx_holds_busy_through_the_start_up_and_sends_at_it
     cond.run(t + 5000)
     assert cond.expect("tx")["t0"] == t + 5000, "on the air once the reference is ready"
     idle(lib, cond)
+    # BUSY falls in the same grant as the frame goes out, on the link's thread:
+    # the edge may be a moment behind the tx the test has already seen.
+    for _ in range(200):
+        if len(drv.edges) >= 2:
+            break
+        time.sleep(0.005)
     assert drv.edges == [(t, 1), (t + 5000, 0)], "BUSY through the start-up, no longer"
 
 

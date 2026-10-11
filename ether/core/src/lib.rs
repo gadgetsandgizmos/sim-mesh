@@ -317,6 +317,8 @@ struct Station {
     standing: i64,
     granted_at: f64,
     idle_said: Option<(i64, Option<i64>)>,
+    /// The number (`n`) of the last idle taken for the message it answers.
+    idle_n: Option<i64>,
     unanswered: Vec<(i64, Vec<u8>)>,
     resent_at: f64,
     stale_said: Option<i64>,
@@ -344,6 +346,7 @@ impl Station {
             standing: 0,
             granted_at: 0.0,
             idle_said: None,
+            idle_n: None,
             unanswered: Vec::new(),
             resent_at: 0.0,
             stale_said: None,
@@ -586,7 +589,8 @@ impl Core {
                 (Some("idle"), Some(sid)) => {
                     let seq = obj.get("seq").and_then(as_int);
                     let until = obj.get("until").and_then(as_truncated);
-                    return self.recv_idle_inner(py, sid, seq, until);
+                    let n = obj.get("n").and_then(as_int);
+                    return self.recv_idle_inner(py, sid, seq, until, n);
                 }
                 (Some("state") | Some("tx"), Some(sid)) => {
                     // Held for the barrier, and taken in station order there;
@@ -610,8 +614,13 @@ impl Core {
 
     /// A station's idle for message `seq`, wanting T again at `until`; it may
     /// let T move. An idle for an older message is the ordinary race once,
-    /// and a lost message if it comes again: that one is sent again.
-    fn recv_idle_inner(&self, py: Python<'_>, sid: i64, seq: Option<i64>, until: Option<i64>) -> PyResult<()> {
+    /// and a lost message if it comes again: that one is sent again. A copy of
+    /// the idle already taken for the current message (the same number `n`:
+    /// the station says its last idle again on the wall clock until something
+    /// comes back) is nothing, even once the station has said something since:
+    /// taken then, it would pass for an idle at a moment the host chose.
+    fn recv_idle_inner(&self, py: Python<'_>, sid: i64, seq: Option<i64>, until: Option<i64>,
+                       n: Option<i64>) -> PyResult<()> {
         let Some(seq) = seq else { return Ok(()) };
         let mut resend = None;
         let mut said = None;
@@ -619,6 +628,9 @@ impl Core {
         {
             let mut s = self.s.borrow_mut();
             let t = s.t;
+            if n.is_some() && s.stations.get(&sid).is_some_and(|st| st.seq == seq && st.idle_n == n) {
+                return Ok(());
+            }
             let Some(st) = s.stations.get_mut(&sid) else { return Ok(()) };
             if seq < st.seq {
                 // Once is the ordinary race, an idle crossing the next message
@@ -633,6 +645,7 @@ impl Core {
                 if seq != st.seq {
                     return Ok(());
                 }
+                st.idle_n = n;
                 st.unanswered.clear();
                 if st.idle && st.idle_said == Some((seq, until)) {
                     return Ok(());
@@ -1008,7 +1021,7 @@ impl Core {
     /// An idle, as if it had come on the socket.
     #[pyo3(signature = (sid, seq, until=None))]
     fn recv_idle(&self, py: Python<'_>, sid: i64, seq: Option<i64>, until: Option<i64>) -> PyResult<()> {
-        self.recv_idle_inner(py, sid, seq, until)
+        self.recv_idle_inner(py, sid, seq, until, None)
     }
 
     /// No more sends and no more calls out, and the reader stopped: the socket

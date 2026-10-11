@@ -94,8 +94,9 @@ void idle();
  *  with no lock held, before anything due at the new T runs. */
 void onAdvance(void (*moved)(void));
 
-/** The idle message itself, the link's to send. */
-void setIdleSender(void (*send)(uint64_t seq, int64_t until));
+/** The idle message itself, the link's to send: `n` numbers the idles the
+ *  station says, and an idle said again (the resend) keeps its number. */
+void setIdleSender(void (*send)(uint64_t seq, int64_t until, uint64_t n));
 
 /** The station has opened its link: in a virtual run, the busy watchdog and
  *  the time shim come up. */

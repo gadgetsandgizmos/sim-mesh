@@ -107,7 +107,19 @@ Two things keep a station from holding T for ever:
   long work takes no T). An idle that
   arrives 18 ms or more after the message it answers was sent is counted per
   station (`slow_idles`), so a run that crawls can say which station is
-  holding it.
+  holding it. Under strict time (`SIM_MESH_STRICT_TIME=1`) it answers only
+  once none of the station's threads is running, so a station at work holds
+  T however long its host takes
+  ([`../INTERNALS.md`](../INTERNALS.md#time), *Strict time*).
+
+A station says its last idle again every 250 ms of wall time until something
+comes back. Each idle carries `n`, the station's own count of its idles, and
+a copy keeps the number of the idle it copies. The core takes an idle for the
+current message whose number it already has for nothing, even once the
+station has said something since: a copy that crossed a `state`, a `tx` or a
+`floor` was otherwise taken for a new idle, at a moment the host chose. An
+idle for an older message is unchanged: said twice, it still has the core
+send what was lost.
 
 A station that leaves (`leave()`) or says `hello` again is forgotten: its
 held messages, its busy mark, its `until`, its channels and its asks go with
@@ -130,8 +142,10 @@ run does the same thing whatever the host's scheduler does:
   station has the run's T and has taken every message sent to it, telling it
   T with a `run` first when it is behind; then the pty gets them. The
   station's time shim reports the running total it has read (`read`), and
-  when that catches up the station is sent a `run` at the T it already has:
-  it is at work on the input, and owes an idle for it like any message.
+  when that catches up the report counts as the station speaking: it is at
+  work on the input and owes an idle for it, and the ether only marks it
+  busy. A `run` sent for the purpose would land at the host's moment, in the
+  middle of that work.
 - **What a station prints**, which the testbed acts on (a framed-RPC reply,
   the capability marker). A station that has sent an idle has written
   everything it wrote before it; before T moves past it the testbed reads its
@@ -147,8 +161,8 @@ run does the same thing whatever the host's scheduler does:
   tells the reader T first if it is behind. Two stations that write to each
   other at one instant therefore go in the same order every run, and the
   reader reads at a T nothing else of the ether's can land in the middle of.
-  The bytes count as written from the answer until the reader's `read`, and
-  the reader then gets its `run`, as for the console. Both ends of a
+  The bytes count as written from the answer until the reader's `read`,
+  which then counts as the reader speaking, as for the console. Both ends of a
   connection name a station, since the shim makes a station's connections to
   a loopback address leave from its own; a connection with an end that is not
   a station of the run (the testbed's web proxy) is not counted, and its asks
@@ -161,7 +175,8 @@ Counts are running totals for the console and per call for TCP (a write the
 kernel took less of is followed by the difference, negative). A channel whose
 reader has not caught up in `UNREAD_GRACE_S` (a second) of wall time is not
 being waited for by anything in the station — input it reads some other way,
-or not at all — and lets go of T, with a line in the log.
+or not at all — and lets go of T, with a line in the log. Under strict time
+there is no such grace: a reader is waited for however long its host takes.
 
 ## The level, and why it is a table
 

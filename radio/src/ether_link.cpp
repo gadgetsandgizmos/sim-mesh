@@ -62,16 +62,18 @@ void sendLine(const char* s, size_t n)
     conductor::spoke();
 }
 
-void sendIdle(uint64_t seq, int64_t until)
+void sendIdle(uint64_t seq, int64_t until, uint64_t idleN)
 {
-    char line[160];
+    char line[192];
     int n;
     if (until == conductor::kNever)
-        n = snprintf(line, sizeof line, "{\"type\":\"idle\",\"sid\":%d,\"seq\":%llu,\"until\":null}",
-                     s_sid, (unsigned long long)seq);
+        n = snprintf(line, sizeof line,
+                     "{\"type\":\"idle\",\"sid\":%d,\"seq\":%llu,\"until\":null,\"n\":%llu}",
+                     s_sid, (unsigned long long)seq, (unsigned long long)idleN);
     else
-        n = snprintf(line, sizeof line, "{\"type\":\"idle\",\"sid\":%d,\"seq\":%llu,\"until\":%lld}",
-                     s_sid, (unsigned long long)seq, (long long)until);
+        n = snprintf(line, sizeof line,
+                     "{\"type\":\"idle\",\"sid\":%d,\"seq\":%llu,\"until\":%lld,\"n\":%llu}",
+                     s_sid, (unsigned long long)seq, (long long)until, (unsigned long long)idleN);
     sendRaw(line, (size_t)n);
 }
 

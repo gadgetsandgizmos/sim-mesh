@@ -280,7 +280,7 @@ static int64_t wait_end(const struct simclock_ops* o, int64_t deadline)
  * until then would run backwards when it did. */
 static int64_t clock_now(const struct simclock_ops* o, clockid_t c)
 {
-    int64_t n = o ? o->node_us() : 0;
+    int64_t n = o ? (o->read_us ? o->read_us() : o->node_us()) : 0;
     int64_t epoch = o ? o->epoch_us() : s_epochEnv;
     return wall_clock(c) ? n + epoch : n;
 }
@@ -1229,15 +1229,28 @@ static void took(int fd, ssize_t rc, int flags)
     if (rc <= 0 || (flags & MSG_PEEK)) return;
     load_mode();
     if (!s_virtual) return;
-    int saved = errno;
+    int saved = errno, said = 0;
     if (fd == 0) {
         long long total = atomic_fetch_add(&s_ttyIn, rc) + rc;
         int left = 0;
-        if (ioctl(0, FIONREAD, &left) != 0 || left <= 0) report_tty("read", total);
+        if (ioctl(0, FIONREAD, &left) != 0 || left <= 0) {
+            report_tty("read", total);
+            said = 1;
+        }
     } else if (reporting(fd)) {
         char key[TCP_KEY];
-        if (tcp_key(fd, 0, key)) report_tcp("read", key, rc);
+        if (tcp_key(fd, 0, key)) {
+            report_tcp("read", key, rc);
+            said = 1;
+        }
     }
+    /* What it read is input the station is at work on now: it owes an idle
+     * for it, as for anything the ether tells it, and the ether, which takes
+     * the report as the station speaking, waits for that idle. Sending it a
+     * message for the purpose instead would land it at the host's moment, in
+     * the middle of that work. */
+    const struct simclock_ops* o = said ? ops() : NULL;
+    if (o && o->spoke) o->spoke();
     errno = saved;
 }
 
