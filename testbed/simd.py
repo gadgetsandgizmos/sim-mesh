@@ -945,9 +945,44 @@ class Simd:
             self.starter = None
 
     async def stop_all(self, flush=True):
+        """Every station stopped, flushed first. In a virtual run they leave T
+        together (leave_together) before any process is touched."""
         self.cancel_start()
-        await asyncio.gather(*(self.stop_station(name, flush)
+        if flush:
+            await self.flush_all()
+        await self.leave_together()
+        await asyncio.gather(*(self.stop_station(name, flush=False)
                                for name in list(self.stations)))
+
+    async def leave_together(self):
+        """In a virtual run, every station leaves T at its next barrier: the
+        instant they are all idle and what they said has been taken, before T
+        moves on and before any is sent its next instant. Stopped one by one,
+        on the host's time, the others ran on meanwhile, and how far into the
+        record they got was the host's to say: two runs of one cell parted
+        there. Each is marked stopping, so none that exits before its own
+        stop is started again. Bounded, as every wait of a stop is: a run
+        that reaches no barrier (a driver holding T, a station that never
+        idles) is stopped as before."""
+        if not self.virtual or not self.stations:
+            return
+        reached = asyncio.get_running_loop().create_future()
+
+        def barrier():
+            if reached.done():
+                return
+            for station in self.stations.values():
+                station.stopping = True
+                station.leave()
+            reached.set_result(None)
+        self.ether.call_at(self.ether.now(), barrier, key=-1)
+        self.ether.kick()
+        try:
+            await asyncio.wait_for(asyncio.shield(reached), SHUTDOWN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            reached.cancel()
+            log("the stations met no barrier in %.0f s: stopped where each was"
+                % SHUTDOWN_TIMEOUT_S)
 
     # ---- the role poll ---------------------------------------------------
 
@@ -1823,6 +1858,9 @@ class Simd:
         await self.stop_all()
         for name in (self.nodeset.nodes if self.nodeset else ()):
             self.broadcast(self.node_message(name))
+        if msg.get("id") is not None:
+            # A driver's (Sim.stop_all): it goes on once every station has stopped.
+            self.answered(msg, {})
 
     async def do_levels(self, msg):
         """What the others would hear from one station, for the hover card.

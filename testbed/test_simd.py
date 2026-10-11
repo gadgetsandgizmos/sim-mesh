@@ -819,6 +819,44 @@ def test_a_driver_takes_turns_with_t(stores):
     asyncio.run(go())
 
 
+def test_a_virtual_runs_stations_leave_t_together_before_any_is_stopped(stores, monkeypatch):
+    """stop_all in a virtual run: one callback at T's next barrier (now, before
+    the stations' own events of that T) has every station leave T, marked
+    stopping so none is started again, before any process is stopped. With no
+    barrier in time they are stopped anyway, and a late one does nothing."""
+    import types
+    monkeypatch.setattr(simd, "SHUTDOWN_TIMEOUT_S", 0.05)
+
+    async def go(barrier_comes):
+        daemon = make_simd(stores, "--time", "max")
+        due, left, stopped = [], [], []
+        daemon.ether = types.SimpleNamespace(
+            clock=types.SimpleNamespace(virtual=True), now=lambda: 7_000_000, kick=lambda: None,
+            call_at=lambda t, callback, key=0: due.append((t, key, callback)))
+
+        def station(name):
+            one = types.SimpleNamespace(name=name, stopping=False)
+            one.leave = lambda: left.append((name, one.stopping, list(stopped)))
+            return one
+        daemon.stations = {name: station(name) for name in "ab"}
+
+        async def stop_station(name, flush=True):
+            stopped.append(name)
+            daemon.stations.pop(name)
+        daemon.stop_station = stop_station
+        stopping = asyncio.ensure_future(daemon.stop_all(flush=False))
+        await asyncio.sleep(0)
+        assert [(t, key) for t, key, _ in due] == [(7_000_000, -1)] and not left
+        if barrier_comes:
+            due[0][2]()
+        await stopping
+        assert stopped == ["a", "b"]
+        due[0][2]()                                 # late, or again: nothing
+        return left
+    assert asyncio.run(go(True)) == [("a", True, []), ("b", True, [])]
+    assert asyncio.run(go(False)) == []
+
+
 def test_a_role_the_station_forgets_is_said_again_after_a_reset(stores, monkeypatch):
     monkeypatch.setattr(ReticulumDriver, "role_volatile", True)
 

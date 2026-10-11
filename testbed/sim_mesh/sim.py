@@ -508,6 +508,12 @@ class Sim:
     def wait_run(self, at):
         return self.until(at)
 
+    async def stop_all(self):
+        """Every station stopped, the simulation kept (simd's stop_all). In a
+        virtual run they leave T together at the next barrier, so the run's
+        record ends at this T, the same in every run."""
+        await self._wait({"type": "stop_all"})
+
     async def stop(self):
         """Stop the simulation itself, through the front."""
         await front_verb(self.session, self.port, {"type": "sim_stop", "name": self.name})
