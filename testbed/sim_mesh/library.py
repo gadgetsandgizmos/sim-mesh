@@ -217,6 +217,12 @@ class Rule:
                                   ", ".join("%s=%r" % kv for kv in self.args.items()))
 
 
+async def _awaited(call, *args):
+    """`call(*args)` on the simulation's loop, and what it hands back awaited:
+    for a method that returns a task to await rather than a coroutine."""
+    return await call(*args)
+
+
 def lines_of(rules):
     """What rules are, in order: strings of one or more lines (kept as their
     text, line by line), Rules (as their data), or lists of either."""
@@ -800,7 +806,9 @@ class Nodes(select_module.Nodes):
         if runtime.sim is None:
             runtime.firmware_rules.append(rule)
             return {}
-        return runtime.call(runtime.sim.firmware([rule]))
+        # The simulation hands back a task of its loop's (`Sim.firmware`), made
+        # and awaited there.
+        return runtime.call(_awaited(runtime.sim.firmware, [rule]))
 
     def on_first_boot(self, *rules):
         """Lines and first-boot rules each is given the first time it boots with

@@ -818,6 +818,12 @@ def test_a_script_says_it_synchronously(monkeypatch, tmp_path):
             nodes(tag="even").on_first_boot(Node.radio(sf=9), "log rnsd debug",
                                             Node.reticulum.lxmf.create())
             assert nodes().up() == reticulum + ["m04"]
+            # Said to the running simulation, as a nodeset's own setup says it
+            # when a script includes it after the simulation is there.
+            assert nodes(tag="even").firmware("beta_latest") == {}
+            assert fake.got[-1]["type"] == "firmware"
+            assert fake.got[-1]["rules"] == [{"which": {"where": {"tag": "even"}},
+                                              "firmware": "beta_latest"}]
             fresh.open_log(str(tmp_path))
             library.script_loglevel("commands")
             assert nodes(tag="even").exec("one\ntwo") == {"n02": "did one\ndid two",
