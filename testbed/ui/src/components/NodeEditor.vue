@@ -186,8 +186,9 @@ const directional = computed(() => picked.value.length > 0 && picked.value.every
   n => catalog.antennaByType[n.antenna.type]?.kind === 'directional'))
 
 /** What the maximum power means: an SX1262 on its own, or behind a front end above 22 dBm. */
-const powerHint = `an SX1262, ${CHIP_MAX_DBM} dBm when empty; above ${CHIP_MAX_DBM} dBm the node has `
-  + `a GC1109 front end as a Heltec V4 does, up to ${FEM_MAX_DBM}`
+const powerHint = `When empty, a virtual SX1262 with a max power of ${CHIP_MAX_DBM} dBm is assumed. `
+  + `When set between ${CHIP_MAX_DBM + 1} and ${FEM_MAX_DBM} dBm, the node behaves as if it has `
+  + 'a GC1109 front end amp, like a Heltec V4 board.'
 
 /** The maximum power at the antenna connector on every selected node; empty clears it. */
 function setMaxDbm(raw: string | number | null) {
