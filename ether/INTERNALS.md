@@ -640,7 +640,8 @@ medium: the ether's job is the frames, and everything watching is optional.
   the next bin; the curve treats it as any other block, which is pessimistic.
 - **Preamble length at the main detector.** It is not matched, and it does
   not change the main detector's lock: four of its symbols are what is
-  needed, however many there are. Only a side detector's lock reads it.- **Bandwidth and offset in the rejection figures.** The inter-SF figures
+  needed, however many there are. Only a side detector's lock reads it.
+- **Bandwidth and offset in the rejection figures.** The inter-SF figures
   were measured at one bandwidth on one carrier; a transmission at another
   bandwidth, or partly overlapping the band, is classed by its spreading
   factor and counted at its whole power.

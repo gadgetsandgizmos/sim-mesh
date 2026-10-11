@@ -12,7 +12,8 @@ and knows a frame only as a carrier, a duration and a payload it never opens.
 python3 ether.py --bind 127.0.0.1:7000 --record record.tsv \
     --geodata <geodata.yaml> --nodeset <nodeset.yaml> --losses <dir> \
     [--noise-figure 6] [--pairwise | --bench-capture] [--fading-db 0] [--coherence-s 3600]
-    [--rician-k K] [--seed N] [--time real|max|<k>x]```
+    [--rician-k K] [--seed N] [--time real|max|<k>x]
+```
 
 Stations reach it through the testbed, which holds it in its own event loop and
 hands it the loss tables by direct call — see [`../README.md`](../README.md).
