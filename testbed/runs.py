@@ -478,6 +478,15 @@ def delete_run(run):
     shutil.rmtree(run.dir)
 
 
+def delete_snapshot(name, snapshots_dir=None):
+    """A snapshot gone, with everything in it. A run started from it holds
+    its own copy, so nothing else needs it."""
+    path = snapshot_path(name, snapshots_dir)
+    if not os.path.isfile(os.path.join(path, SNAPSHOT_FILE)):
+        raise store.StoreError("no snapshot called %r" % name)
+    shutil.rmtree(path)
+
+
 def snapshot_info(name, snapshots_dir=None):
     """A snapshot's snapshot.yaml, for a listing."""
     return _read_yaml(os.path.join(snapshot_path(name, snapshots_dir), SNAPSHOT_FILE))

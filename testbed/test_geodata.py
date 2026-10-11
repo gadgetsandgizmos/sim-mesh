@@ -16,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import geodata  # noqa: E402
+import nodeset as nodeset_module  # noqa: E402
 import store  # noqa: E402
 
 # Corners of the berlin-city pack as planner-web's /api/pack states them:
@@ -299,9 +300,11 @@ def test_geodata_a_snapshot_stands_on_is_neither_renamed_nor_deleted(tmp_path, m
     own_store(tmp_path, monkeypatch)
     pack = write_pack()
     geodata.write_copy(geodata.load("tiny"), str(tmp_path / "snapshots" / "s1" / "geodata.yaml"))
-    with pytest.raises(store.StoreError, match="ground of snapshot s1: delete it before renaming"):
+    with pytest.raises(store.StoreError,
+                       match="snapshot s1 stands on tiny's pack: delete it before renaming tiny"):
         geodata.rename("tiny", "small")
-    with pytest.raises(store.StoreError, match="ground of snapshot s1: delete it before deleting"):
+    with pytest.raises(store.StoreError,
+                       match="snapshot s1 stands on tiny's pack: delete it before deleting tiny"):
         geodata.delete("tiny")
     assert geodata.names() == ["tiny"] and pack.is_dir()
     shutil.rmtree(str(tmp_path / "snapshots" / "s1"))
@@ -458,7 +461,7 @@ def test_a_pack_another_geodata_stands_on_is_not_moved_from_under_it(tmp_path, m
     for go, doing in ((lambda: geodata.delete("berlin"), "deleting"),
                       (lambda: geodata.rename("berlin", "b2"), "renaming")):
         with pytest.raises(store.StoreError,
-                           match="berlin is the ground of geodata median: delete it before %s it"
+                           match="geodata median stands on berlin's pack: delete it before %s berlin"
                            % doing):
             go()
     # The one that only names the pack goes without it, a run on the pack or
@@ -466,6 +469,31 @@ def test_a_pack_another_geodata_stands_on_is_not_moved_from_under_it(tmp_path, m
     geodata.write_copy(median, str(tmp_path / "runs" / "r1" / "geodata.yaml"))
     geodata.delete("median")
     assert pack.is_dir() and geodata.names() == ["berlin"]
-    with pytest.raises(store.StoreError, match="ground of run r1"):
+    with pytest.raises(store.StoreError, match="run r1 stands on berlin's pack"):
         geodata.delete("berlin")
+
+
+def test_a_delete_takes_what_stands_on_the_pack_and_nodesets_left_on_nothing(tmp_path, monkeypatch):
+    own_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(store, "NODESETS_DIR", str(tmp_path / "nodesets"))
+    write_pack("berlin")                                  # 13.3–13.5 E, 52.4–52.6 N
+    geodata.write(geodata.geodata_path("median"), {"pack": "../berlin", "loc_pct": 50})
+    geodata.write(geodata.geodata_path("flat"), {"synthetic": {"exponent": 3.0}})
+    berlin = geodata.load("berlin")
+    geodata.write_copy(berlin, str(tmp_path / "runs" / "r1" / "geodata.yaml"))
+    geodata.write_copy(berlin, str(tmp_path / "snapshots" / "s1" / "geodata.yaml"))
+    geodata.write_copy(geodata.load("flat"), str(tmp_path / "runs" / "r2" / "geodata.yaml"))
+    for name, places in (("mitte", [(52.5, 13.4)]),               # on berlin alone
+                         ("both", [(52.5, 13.4), (0.0, 0.0)]),    # on berlin and on flat
+                         ("elsewhere", [(48.1, 11.6)])):          # on neither
+        ns = nodeset_module.create(name)
+        for i, (lat, lon) in enumerate(places):
+            ns.add_node("n%d" % i, lat, lon)
+        ns.save()
+    assert geodata.taken_with(["berlin"]) == {
+        "geodata": ["median"], "runs": ["r1"], "snapshots": ["s1"], "nodesets": ["mitte"]}
+    # Geodata that only names a pack takes nothing with it but what is left on no geodata.
+    assert geodata.taken_with(["median"]) == {
+        "geodata": [], "runs": [], "snapshots": [], "nodesets": []}
+    assert geodata.taken_with(["berlin", "flat"])["nodesets"] == ["both", "mitte"]
 

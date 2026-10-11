@@ -153,6 +153,12 @@ geodata_open {name}               → {geodata, planner}   holds the sidecar for
 geodata_close                                            lets it go
 geodata_new {name, pack | synthetic: {terrain, exponent, extent_m}}   → {geodata}
 geodata_save {name, data} · geodata_save_as {name, data}              → {geodata}
+geodata_rename {name, to}         → {name}     refused while anything stands on its pack
+geodata_delete_plan {names}       → {geodata, runs, snapshots, nodesets, running}   what a
+                                    delete takes with it (geodata.taken_with, and the runs of
+                                    the simulations on it), said before it is done
+geodata_delete {names}            → {deleted}  the geodata and all its plan names gone,
+                                    simulations on those runs stopped first
 nodeset_list {geodata?}           → {nodesets: [{name, nodes, bbox, tags, bytes, from_index,
                                      inside?} | {name, error, bytes}]}
                                     inside: whether a node stands in that geodata's extent;
@@ -362,7 +368,8 @@ EDITOR_VERBS = (
     "firmware_list", "firmware_prebuilt", "firmware_add", "firmware_delete", "antenna_list",
     "module_open",
     "geodata_list", "geodata_open", "geodata_close", "geodata_new", "geodata_save",
-    "geodata_save_as", "geodata_rename", "geodata_delete", "geodata_sources",
+    "geodata_save_as", "geodata_rename", "geodata_delete", "geodata_delete_plan",
+    "geodata_sources",
     "geodata_source_clear", "geodata_source_map", "geodata_sources_at",
     "index_list", "index_new", "index_delete", "index_install", "index_cancel",
     "nodeset_list", "nodeset_open", "nodeset_new", "nodeset_save", "nodeset_save_as",
@@ -1371,6 +1378,56 @@ class Front:
         log("run %s deleted" % name)
         return {"type": "run_delete", "ok": True, "run": name}
 
+    @staticmethod
+    def geodata_names(msg):
+        """The geodata a delete names, `names` or one `name`, each one that is here."""
+        names = [str(n) for n in (msg.get("names") or [msg.get("name")]) if n]
+        for name in names:
+            if not os.path.isfile(geodata_module.geodata_path(name)):
+                raise store.StoreError("no geodata called %r" % name)
+        return names
+
+    def geodata_delete_plan(self, names):
+        """What deleting the geodata `names` takes with it, to be said before
+        it is done: `geodata.taken_with`, and the runs of the simulations still
+        on any of that geodata, running or exited, which are stopped
+        (`running`, by simulation name)."""
+        plan = geodata_module.taken_with(names)
+        leaving = set(names) | set(plan["geodata"])
+        on = [c for c in self.children.values() if c.loaded.get("geodata") in leaving]
+        plan["runs"] = sorted(set(plan["runs"]) | {os.path.basename(c.run_dir) for c in on})
+        plan["running"] = sorted(c.name for c in on if c.state != "exited")
+        return plan
+
+    async def geodata_delete(self, names):
+        """The geodata `names` gone, packs included, and everything their plan
+        says goes with them: simulations stopped, runs and snapshots deleted,
+        the geodata that named their packs, and the nodesets left on none."""
+        plan = await asyncio.to_thread(self.geodata_delete_plan, names)
+        for run in plan["runs"]:
+            await self.run_delete({"run": run, "stop": True})
+        for snapshot in plan["snapshots"]:
+            await asyncio.to_thread(runs_module.delete_snapshot, snapshot)
+        # What only names a pack goes before the geodata whose pack it is.
+        order = plan["geodata"] + sorted(names, key=lambda n: geodata_module.own_pack(n) is not None)
+        for name in order:
+            await self.stop_sidecar(name)
+            await asyncio.to_thread(geodata_module.delete, name)
+        for nodeset in plan["nodesets"]:
+            nodeset_module.delete(nodeset)
+        self.changed = True
+        log("deleted geodata %s%s" % (", ".join(order), "".join(
+            "; %s %s" % (what, ", ".join(plan[what]))
+            for what in ("runs", "snapshots", "nodesets") if plan[what])))
+        return {"deleted": dict(plan, geodata=order)}
+
+    async def stop_sidecar(self, name):
+        """The planner sidecar on the geodata's pack stopped, when one runs."""
+        pack = geodata_module.pack_of(geodata_module.geodata_path(name))
+        car = self.sidecars.by_pack.pop(pack, None) if pack else None
+        if car is not None:
+            await self.sidecars.stop(car)
+
     def ended_rows(self):
         """Every run that is neither running nor paused: what it ran, when,
         and whether it has a report. Each is read again only when its
@@ -1666,22 +1723,20 @@ class Front:
             self.cancel_asked.add(self.fetch_key(msg))
             got[1].cancel()
             return {}
-        if verb in ("geodata_rename", "geodata_delete"):
+        if verb == "geodata_delete_plan":
+            return await asyncio.to_thread(self.geodata_delete_plan, self.geodata_names(msg))
+        if verb == "geodata_delete":
+            return await self.geodata_delete(self.geodata_names(msg))
+        if verb == "geodata_rename":
             live = [c.name for c in self.children.values()
                     if c.state != "exited" and c.loaded.get("geodata") == name]
             if live:
-                raise store.StoreError("%s is the ground of %s, which is running"
-                                       % (name, ", ".join(live)))
-            pack = geodata_module.pack_of(geodata_module.geodata_path(name))
-            car = self.sidecars.by_pack.pop(pack, None) if pack else None
-            if car is not None:
-                await self.sidecars.stop(car)
-            if verb == "geodata_rename":
-                to = store.check_name(msg.get("to"), "geodata")
-                geodata_module.rename(name, to)
-                return {"name": to}
-            geodata_module.delete(name)
-            return {"name": name}
+                raise store.StoreError("simulation %s stands on %s and is running"
+                                       % (", ".join(live), name))
+            await self.stop_sidecar(name)
+            to = store.check_name(msg.get("to"), "geodata")
+            geodata_module.rename(name, to)
+            return {"name": to}
         if verb == "geodata_open":
             return await self.open_geodata(conn, load_geodata(name))
         if verb == "geodata_close":

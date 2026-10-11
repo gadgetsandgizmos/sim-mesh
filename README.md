@@ -1360,9 +1360,12 @@ it is shown on its own, with no nodes, scrollable and zoomable, with
 the view shared between the two; **← Geodata** returns to the list, where the
 chosen row is marked. Choosing another asks first when the nodeset being
 edited has unsaved changes: save them, discard them, or stay. Each row
-renames its geodata or deletes it, its pack included; neither is allowed
-while a run or a snapshot stands on its pack, whose copy of the geodata
-names the pack's directory, and the page says which. **New synthetic**
+renames its geodata or deletes it, its pack included. A rename is refused
+while a run, a snapshot or another geodata stands on its pack, whose copy
+of the geodata names the pack's directory, and the page says which. A
+delete takes those with it, and the nodesets that would stand on no
+geodata left: the one confirmation names every run (stopping a simulation
+still on one), snapshot, geodata and nodeset that goes. **New synthetic**
 makes flat synthetic ground at an exponent and an extent, **Build** opens
 the build view, and **Import zip** takes a sim-mesh geodata pack or a bare
 planner pack ([Geodata](#geodata)).
@@ -1998,7 +2001,8 @@ The front's editor verbs are answered to the asking socket as `{type, ok,
 | `firmware_delete {names, stop_paused?}` | firmware removed, `{deleted, stopped}`; refused for any a snapshot holds, and for any a paused simulation holds unless `stop_paused`, which stops those simulations for good first |
 | `antenna_list` | the antenna catalogue, each with its picture |
 | `geodata_list`, `geodata_open`, `geodata_close`, `geodata_new`, `geodata_save`, `geodata_save_as` | geodata, each listed with how many nodesets have a node on it, its size (`bytes`) and the index it came from (`from_index`); opening a pack holds its sidecar for the socket |
-| `geodata_rename {name, to}`, `geodata_delete {name}` | another name, or gone, with its own pack; refused while a running simulation stands on it; a delete says what keeps the pack (`kept_by`) |
+| `geodata_rename {name, to}` | another name, with its own pack; refused while a running simulation, a run, a snapshot or another geodata stands on its pack |
+| `geodata_delete_plan {names}`, `geodata_delete {names}` | what deleting the geodata takes with it, `{geodata, runs, snapshots, nodesets, running}`: what stands on their own packs, the runs of the simulations on any of it (`running` those still running, which are stopped), and the nodesets with a node on it and on no geodata left; and the delete, all of that and the geodata, packs included, `{deleted}` |
 | `geodata_sources`, `geodata_source_clear {source}` | the build's cache, one row per source with its licence and size, and one source's emptied (refused while a build runs) |
 | `index_list`, `index_new {address}`, `index_delete {name}` | the listed indexes, each entry saying whether it is here; another listed; an added one forgotten |
 | `index_install {index, kind, name}`, `index_cancel {index, kind, name}` | an entry installed, answered when it is in, its progress to every page as `index_progress`; a fetch stopped |

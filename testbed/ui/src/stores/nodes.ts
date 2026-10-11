@@ -424,12 +424,18 @@ export const useNodes = defineStore('nodes', {
     async deleteNodeset(name: string): Promise<string | null> {
       const r = await request('nodeset_delete', { name })
       if (!r.ok) return r.error ?? 'could not delete it'
-      if (this.nodeset?.name === name) this.close()
-      delete this.viewed[name]
-      this.sets = this.sets.filter(l => l.name !== name)
-      if (this.checked.has(name)) this.checked = new Set([...this.checked].filter(n => n !== name))
+      this.forget([name])
       void useCatalog().refreshGeodata()
       return null
+    },
+
+    /** Nodesets deleted elsewhere (with the geodata they stood on) let go of:
+     *  closed when one is being edited, off the list and the map. */
+    forget(names: string[]) {
+      if (this.nodeset?.name && names.includes(this.nodeset.name)) this.close()
+      for (const name of names) delete this.viewed[name]
+      this.sets = this.sets.filter(l => !names.includes(l.name))
+      this.checked = new Set([...this.checked].filter(n => !names.includes(n)))
     },
 
     async save(): Promise<string | null> {

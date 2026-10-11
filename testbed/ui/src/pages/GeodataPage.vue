@@ -399,27 +399,48 @@ function askRename(n: string) {
   else go()
 }
 
-/* The geodata named deleted after one confirmation; each refusal (a run or a
- * snapshot stands on it) is said, and the rest go. */
-function askDelete(names: string[]) {
+/* "run a" or "runs a, b"; nothing for none. */
+function named(one: string, many: string, names: string[]) {
+  return names.length ? `${names.length === 1 ? one : many} ${names.join(', ')}` : ''
+}
+
+/* The geodata named deleted after one confirmation, which says everything
+ * that goes with it: the runs, snapshots and other geodata on its packs (the
+ * simulations on them stopped), and the nodesets left on no geodata. */
+async function askDelete(names: string[]) {
+  const plan = await request('geodata_delete_plan', { names })
+  if (!plan.ok) { tell(plan.error); return }
+  const runs = plan.runs as string[], running = plan.running as string[]
+  const also = [
+    named('run', 'runs', runs) + (running.length
+      ? ` (${named('simulation', 'simulations', running)} stopped first)` : ''),
+    named('snapshot', 'snapshots', plan.snapshots as string[]),
+    named('geodata', 'geodata', plan.geodata as string[]),
+    named('nodeset', 'nodesets', plan.nodesets as string[])
+      + ((plan.nodesets as string[]).length ? ', which stand on no other geodata' : ''),
+  ].filter(Boolean)
   const size = catalog.geodata.filter(g => names.includes(g.name)).reduce((t, g) => t + (g.bytes ?? 0), 0)
   const go = () => quasar.dialog({
     title: names.length === 1 ? `Delete ${names[0]}` : `Delete ${names.length} geodata`,
-    message: `Delete ${names.join(', ')}, packs included (${sizeText(size)})? This cannot be undone. `
-      + 'Nodesets are not touched; geodata a run or a snapshot stands on is not deleted.',
+    message: `Delete ${names.join(', ')}, packs included (${sizeText(size)})?`
+      + (also.length ? ` This also deletes ${also.join('; ')}.` : '')
+      + ' This cannot be undone.',
     ok: { label: 'Delete', color: 'negative', flat: true, noCaps: true },
     cancel: { flat: true, noCaps: true }, persistent: true,
   }).onOk(async () => {
-    const refused: string[] = []
-    for (const n of names) {
-      const r = await request('geodata_delete', { name: n })
-      if (!r.ok) { refused.push(r.error ?? n); continue }
-      if (nodes.geodata === n) { await nodes.chooseGeodata(null); preview.value = null; await ground.open(null) }
+    const r = await request('geodata_delete', { names })
+    if (r.ok) {
+      const deleted = r.deleted as { geodata: string[], nodesets: string[] }
+      if (nodes.geodata && deleted.geodata.includes(nodes.geodata)) {
+        await nodes.chooseGeodata(null); preview.value = null; await ground.open(null)
+      }
+      nodes.forget(deleted.nodesets)
     }
     sel.none()
     await catalog.refreshGeodata()
+    void catalog.refreshNodesets()
     void catalog.refreshIndexes()
-    tell(refused.length ? refused.join('; ') : null, 'deleted')
+    tell(r.ok ? null : r.error, 'deleted')
   })
   if (nodes.geodata && names.includes(nodes.geodata)) whenSaved(quasar, go)
   else go()

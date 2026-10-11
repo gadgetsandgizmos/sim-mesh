@@ -94,6 +94,7 @@ import zipfile
 
 import yaml
 
+import nodeset as nodeset_module
 import store
 
 PACK, SYNTHETIC = "pack", "synthetic"
@@ -547,34 +548,78 @@ def pack_of(path):
 
 
 def pack_users(pack_dir, but=None):
-    """What stands on a pack: other geodata that name it as their pack, as
-    `geodata <name>` (`but` is left out), and runs and snapshots, as `run
-    <name>` and `snapshot <name>`."""
-    out = ["geodata %s" % other for other in names()
+    """What stands on a pack, as (kind, name): other geodata that name it as
+    their pack (`geodata`; `but` is left out), and runs and snapshots (`run`,
+    `snapshot`)."""
+    out = [("geodata", other) for other in names()
            if other != but and pack_of(geodata_path(other)) == pack_dir]
     for what, base in (("run", store.RUNS_DIR), ("snapshot", store.SNAPSHOTS_DIR)):
         if os.path.isdir(base):
-            out += ["%s %s" % (what, entry) for entry in sorted(os.listdir(base))
+            out += [(what, entry) for entry in sorted(os.listdir(base))
                     if pack_of(os.path.join(base, entry, GEODATA_FILE)) == pack_dir]
     return out
 
 
+def own_pack(name):
+    """The pack in the geodata's own directory, or None: a geodata whose pack
+    is another's, or that is synthetic, holds none."""
+    src = geodata_path(name)
+    pack = pack_of(src)
+    return pack if pack is not None and pack == os.path.dirname(os.path.abspath(src)) else None
+
+
+def own_pack_users(name):
+    """What stands on the geodata's own pack, as `pack_users` says it: a run
+    or a snapshot, whose copies name the directory, or another geodata that
+    names it as its pack (the same pack at another loc_pct or shadowing, not
+    copied)."""
+    pack = own_pack(name)
+    return pack_users(pack, but=name) if pack else []
+
+
+def taken_with(gone):
+    """What deleting the geodata `gone` takes with it, so that nothing is left
+    standing on a pack that is no more or on no geodata at all: whatever
+    stands on their own packs (`own_pack_users`), and the nodesets with a node
+    on one of them and on no geodata left after. {"geodata", "runs",
+    "snapshots", "nodesets"}, each a sorted list of names."""
+    out = {"geodata": set(), "run": set(), "snapshot": set()}
+    for name in gone:
+        for what, user in own_pack_users(name):
+            out[what].add(user)
+    leaving = set(gone) | out["geodata"]
+
+    def extent(name):
+        try:
+            return load(name).bbox
+        except store.StoreError:
+            return None
+    going = [b for b in map(extent, sorted(leaving)) if b]
+    kept = [b for b in map(extent, sorted(set(names()) - leaving)) if b]
+    nodesets = []
+    for each in nodeset_module.names():
+        try:
+            ns = nodeset_module.load(each)
+        except store.StoreError:
+            continue
+        if any(ns.inside(b) for b in going) and not any(ns.inside(b) for b in kept):
+            nodesets.append(each)
+    return {"geodata": sorted(out["geodata"] - set(gone)), "runs": sorted(out["run"]),
+            "snapshots": sorted(out["snapshot"]), "nodesets": nodesets}
+
+
 def _unheld(name, doing):
-    """The geodata's directory, refused while its own pack, the one in the
-    directory, has something else standing on it: a run or a snapshot, whose
-    copies name the directory, or another geodata that names it as its pack
-    (the same pack at another loc_pct or shadowing, not copied). A geodata
-    whose pack is another's holds none in its directory and goes freely."""
+    """The geodata's directory, refused while anything stands on its own pack
+    (`own_pack_users`)."""
     src = geodata_path(name)
     if not os.path.isfile(src):
         raise store.StoreError("no geodata called %r" % name)
-    pack = pack_of(src)
-    own = pack is not None and pack == os.path.dirname(os.path.abspath(src))
-    held = pack_users(pack, but=name) if own else []
+    held = own_pack_users(name)
     if held:
-        raise store.StoreError("%s is the ground of %s: delete %s before %s it"
-                               % (name, ", ".join(held),
-                                  "it" if len(held) == 1 else "them", doing))
+        raise store.StoreError("%s stand%s on %s's pack: delete %s before %s %s"
+                               % (", ".join("%s %s" % h for h in held),
+                                  "" if len(held) > 1 else "s", name,
+                                  "them" if len(held) > 1 else "it", doing, name))
     return os.path.dirname(src)
 
 

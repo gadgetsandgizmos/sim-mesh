@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import pathlib
 import shutil
 import socket
 import struct
@@ -461,6 +462,34 @@ def test_the_editors_list_open_and_save(stores):
         assert all(a["svg"].startswith("<svg") for a in reply["antennas"])
         sims = await ask(ws, "sims")
         assert "script_runs" in sims and sims["nodesets"] == ["copy", "here", "there"]
+    running_front(check)
+
+
+def test_a_geodata_delete_says_and_takes_what_stands_on_it(stores):
+    pack = pathlib.Path(geodata.geodata_dir("berlin"))
+    pack.mkdir()
+    (pack / "manifest.json").write_text(json.dumps(
+        {"region": {"crs_epsg": 32633, "bbox": [13.3, 52.4, 13.5, 52.6]}}))
+    geodata.write(geodata.geodata_path("berlin"), {"pack": "."})
+    berlin = geodata.load("berlin")
+    for base, name, marker in ((store.RUNS_DIR, "r1", runs.RUN_FILE),
+                               (store.SNAPSHOTS_DIR, "s1", runs.SNAPSHOT_FILE)):
+        geodata.write_copy(berlin, os.path.join(base, name, "geodata.yaml"))
+        pathlib.Path(base, name, marker).write_text("{}\n")
+
+    async def check(f, session, base, ws):
+        reply = await ask(ws, "geodata_rename", name="berlin", to="b2")
+        assert not reply["ok"] and "run r1, snapshot s1 stand on berlin's pack" in reply["error"]
+        reply = await ask(ws, "geodata_delete_plan", names=["berlin"])
+        assert {k: reply[k] for k in ("geodata", "runs", "snapshots", "nodesets", "running")} \
+            == {"geodata": [], "runs": ["r1"], "snapshots": ["s1"], "nodesets": ["there"],
+                "running": []}
+        reply = await ask(ws, "geodata_delete", names=["berlin"])
+        assert reply["ok"] and reply["deleted"]["geodata"] == ["berlin"]
+        assert geodata.names() == ["flat"] and not pack.exists()
+        assert os.listdir(store.RUNS_DIR) == [] and os.listdir(store.SNAPSHOTS_DIR) == []
+        # `here` stands on flat, which is still there.
+        assert nodeset.names() == ["here"]
     running_front(check)
 
 
