@@ -1045,6 +1045,15 @@ class Ether(asyncio.DatagramProtocol):
                 self.settle(self.release)
         return end
 
+    def station_idle(self, sid):
+        """Whether station `sid` has said it is idle since it was last told
+        anything: done with the instant it is at. True in a real-time run, and
+        for a station not in the run."""
+        if not self.clock.virtual:
+            return True
+        station = self.stations.get(sid)
+        return station is None or bool(station.idle)
+
     def recv_floor(self, sid, addr, msg):
         """The station's host door changed hands. It said something, so it is
         not idle until it says so; a floor outside a tool session is no

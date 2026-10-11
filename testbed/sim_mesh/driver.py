@@ -275,6 +275,22 @@ class Driver:
             if end is not None:
                 end()
 
+    async def tool_settle(self, station, timeout=5.0):
+        """Inside a tool turn, before the tool writes: until the station is
+        idle at the turn's T. T stands while the tool has the floor, but a
+        station due at that instant may still be at its work when the tool
+        starts, and bytes landing then were taken at whichever of its looks
+        the host ran first. Landing on an idle station they are taken at the
+        floor's run, a T the run decides. Polled on the wall clock: nothing
+        here moves T."""
+        clock = station.clock
+        if clock is None or not hasattr(clock, "station_idle"):
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not clock.station_idle(station.node_id) and loop.time() < deadline:
+            await asyncio.sleep(0.0005)
+
     async def rpc_query(self, station, line, timeout=None):
         """One framed-RPC query on the station's console: what it answered."""
         if station.rpc is None:
