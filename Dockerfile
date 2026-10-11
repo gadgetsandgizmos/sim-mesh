@@ -24,6 +24,10 @@
 FROM docker.io/library/ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+# A UTF-8 locale for everything run here, not only what `sim` starts: without
+# one Ruby reads sources as US-ASCII, and Sass refuses the site theme's
+# stylesheet. C.UTF-8 is built into the C library; nothing to install.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 RUN set -eux; \
     apt-get update; \
