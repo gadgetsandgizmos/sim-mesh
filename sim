@@ -523,6 +523,11 @@ cmd_dev() {
         # US-ASCII and Sass refuses the theme's stylesheet.
         local polling=()
         [ -z "${SIM_MESH_IN_CONTAINER:-}" ] || polling=(--force_polling)
+        # The site's firmware-contract page is this checkout's CONTRACT.md,
+        # made into the include it shows, as its deploy makes it from main.
+        [ ! -f "$SITE/_tools/contract.py" ] \
+            || "$py" "$SITE/_tools/contract.py" "$ROOT/CONTRACT.md" \
+            || say "the site's contract page could not be made from CONTRACT.md"
         (cd "$SITE" && export BUNDLE_PATH="$HOME/.cache/sim-mesh/site-gems" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
             && bundle install --quiet \
             && exec bundle exec jekyll serve --host 0.0.0.0 --port "$SITE_PORT" \
