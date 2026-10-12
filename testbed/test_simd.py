@@ -996,3 +996,20 @@ def test_a_tool_that_ends_as_its_wait_times_out_is_a_tool_that_gave_no_answer(mo
     from sim_mesh import driver
     with pytest.raises(driver.CommandError, match="gave no answer"):
         asyncio.run(driver.run_tool(["/bin/true"], 0.05))
+
+
+def test_a_backbone_has_a_table_of_its_own_in_the_run(stores, monkeypatch):
+    """T127: with SIM_MESH_BACKBONE naming two nodes, the run holds a table for
+    the backbone's band beside the mesh's, the two of them only, and the
+    medium is handed both."""
+    monkeypatch.setenv("SIM_MESH_BACKBONE", "a,c")
+
+    async def go():
+        daemon = make_simd(stores)
+        await daemon.start_ether()
+        await daemon.do_sim_load({"geodata": "flat", "nodeset": "three"})
+        assert daemon.run.bands() == ["433", "868"]
+        assert daemon.tables["433"].names == ["a", "c"]
+        assert sorted(daemon.tables) == ["433", "868"]
+        daemon.ether.close()
+    asyncio.run(go())

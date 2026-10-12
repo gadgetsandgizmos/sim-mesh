@@ -2002,8 +2002,14 @@ class Simd:
         for band in losses_module.bands_of(ns, gd):
             tables[band], _ = await losses_module.compute(gd, ns, band, sidecar,
                                                           self.progress(band), notice=log)
+        backbone = losses_module.backbone_table(gd, ns, tables)
         run = runs_module.create_run(free_run_dir(self.run_base), gd, ns, script_name,
                                      self.args.time, tables)
+        if backbone is not None:
+            # Into the run's own copy, which `adopt` reads: never the cache,
+            # which holds what the model computed.
+            losses_module.write_table(backbone, run.table_path(backbone.band))
+            log("backbone: %s at %d Hz" % (", ".join(backbone.names), backbone.f0_hz))
         run.set(build=msg.get("build") or None, build_tag=msg.get("build_tag") or None,
                 firmware_rules=list(msg.get("firmware_rules") or []),
                 first_boot_rules=list(msg.get("first_boot_rules") or []))
