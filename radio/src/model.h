@@ -62,6 +62,9 @@ struct VirtualRxEnd {
 /** The noise floor a receiver reports when nothing is arriving. */
 constexpr int kNoiseFloorDbm = -110;
 
+/** The most radio slots a station has: chips 0 to 7. */
+constexpr int kMaxSlots = 8;
+
 /** The chip for a slot, if one has been opened. */
 struct simradio* modelChip(int slot);
 

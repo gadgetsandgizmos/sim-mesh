@@ -155,6 +155,7 @@ def station():
                                      ("127.0.0.1:%d" % ether.port).encode()) == 0
     _, hello = ether.expect("hello")
     assert hello["sid"] == SID
+    ether.hello = hello
     # Idempotent: a second open neither fails nor says hello again.
     assert lib.simradio_station_open(SID, b"127.0.0.1", b"127.0.0.1:1") == 0
     return lib, ether
@@ -640,6 +641,23 @@ def test_a_multi_sf_receiver_states_the_faster_sfs_it_hears(chip):
     done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                            "%s::%s" % (os.path.abspath(__file__),
                                        "test_a_multi_sf_receiver_states_the_faster_sfs_it_hears")],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_a_station_says_every_radio_slot_in_its_hello(station):
+    """The ether tells a frame only to the slots a station listed in its hello,
+    and a second hello is a restart: a station with two radios
+    (SIM_MESH_RADIO_SLOTS=2, read once per process) lists both from the start;
+    one with no setting lists slot 0, as before."""
+    _, ether = station
+    assert ether.hello["slots"] == list(range(int(os.environ.get("SIM_MESH_RADIO_SLOTS") or 1)))
+    if os.environ.get("SIM_MESH_RADIO_SLOTS"):
+        return
+    env = dict(os.environ, SIM_MESH_RADIO_SLOTS="2")
+    done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                           "%s::%s" % (os.path.abspath(__file__),
+                                       "test_a_station_says_every_radio_slot_in_its_hello")],
                           env=env, capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stdout + done.stderr
 

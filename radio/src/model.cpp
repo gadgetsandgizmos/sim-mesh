@@ -513,7 +513,6 @@ struct simradio {
 
 namespace {
 
-constexpr int kMaxSlots = 8;
 simradio* s_chips[kMaxSlots] = {};
 
 /* Who to tell when DIO1 moves, taken under the lock and called outside it:
