@@ -858,6 +858,41 @@ def bands_of(ns, gd=None, radio=None):
     return [slt.band_for(radio["freq_mhz"] * 1e6) or "868"]
 
 
+# A gateways' backbone stands in for the uplink real gateways have, which no
+# simulated radio path carries: its members hear each other at this loss,
+# clean at any spreading factor and power a station uses, and nobody else
+# hears them on its channel. The uplink is not what a run with one measures.
+BACKBONE_LOSS_DB = 60.0
+BACKBONE_RADIO = "433920000,5,500"
+
+
+def backbone_table(gd, ns, taken, env=None):
+    """The backbone's table, or None. The nodes SIM_MESH_BACKBONE names
+    (comma-separated) get a second radio from their driver, on the channel of
+    SIM_MESH_BACKBONE_RADIO (`<Hz>,<SF>,<kHz>`, BACKBONE_RADIO unset): they
+    hear each other in that channel's band at BACKBONE_LOSS_DB, and nobody
+    else does. `taken` is the bands the run already has, which a backbone
+    sharing would hand its members links on the mesh's own channels."""
+    env = os.environ if env is None else env
+    names = [n for n in (env.get("SIM_MESH_BACKBONE") or "").split(",") if n in ns.nodes]
+    if len(names) < 2:
+        return None
+    hz = int((env.get("SIM_MESH_BACKBONE_RADIO") or BACKBONE_RADIO).split(",")[0])
+    band = slt.band_for(hz)
+    if band is None or band in taken:
+        raise LossError("the backbone's carrier, %d Hz, needs a band of its own, not %s"
+                        % (hz, band or "none"))
+    head = header_for(gd, ns, band)
+    head.update(nodes=[n for n in head["nodes"] if n["name"] in names], f0_hz=hz,
+                model="backbone", radius_m=None)
+    table = slt.Table(head)
+    for a in names:
+        for b in names:
+            if a != b:
+                table.loss[table.cell(a, b)] = BACKBONE_LOSS_DB
+    return table
+
+
 async def build(gd, ns, band, base_url=None, progress=None, radius_m=DEFAULT_RADIUS_M,
                 concurrency=None, session=None, planner_version=None, notice=None):
     """A fresh table for any geodata, not touching the cache."""

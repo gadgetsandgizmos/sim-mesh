@@ -819,6 +819,118 @@ def test_a_driver_takes_turns_with_t(stores):
     asyncio.run(go())
 
 
+def test_a_virtual_runs_stations_leave_t_together_before_any_is_stopped(stores, monkeypatch):
+    """stop_all in a virtual run: one callback at T's next barrier (now, before
+    the stations' own events of that T) has every station leave T, marked
+    stopping so none is started again, before any process is stopped. With no
+    barrier in time they are stopped anyway, and a late one does nothing."""
+    import types
+    monkeypatch.setattr(simd, "SHUTDOWN_TIMEOUT_S", 0.05)
+
+    async def go(barrier_comes):
+        daemon = make_simd(stores, "--time", "max")
+        due, left, stopped = [], [], []
+        daemon.ether = types.SimpleNamespace(
+            clock=types.SimpleNamespace(virtual=True), now=lambda: 7_000_000, kick=lambda: None,
+            call_at=lambda t, callback, key=0: due.append((t, key, callback)))
+
+        def station(name):
+            one = types.SimpleNamespace(name=name, stopping=False)
+            one.leave = lambda: left.append((name, one.stopping, list(stopped)))
+            return one
+        daemon.stations = {name: station(name) for name in "ab"}
+
+        async def stop_station(name, flush=True):
+            stopped.append(name)
+            daemon.stations.pop(name)
+        daemon.stop_station = stop_station
+        stopping = asyncio.ensure_future(daemon.stop_all(flush=False))
+        await asyncio.sleep(0)
+        assert [(t, key) for t, key, _ in due] == [(7_000_000, -1)] and not left
+        if barrier_comes:
+            due[0][2]()
+        await stopping
+        assert stopped == ["a", "b"]
+        due[0][2]()                                 # late, or again: nothing
+        return left
+    assert asyncio.run(go(True)) == [("a", True, []), ("b", True, [])]
+    assert asyncio.run(go(False)) == []
+
+
+def test_a_node_powered_off_stays_off_and_boots_from_its_state_when_powered_on(stores):
+    """node_stop: the station stops and is not started again, the node stays
+    in the nodeset and the medium, and the run's events say so; node_start:
+    it boots with the state it had, so it is not set up again. A start of a
+    running one and a stop of a stopped one do nothing."""
+    async def go():
+        daemon = make_simd(stores)
+        await daemon.start_ether()
+        await daemon.do_sim_load({"geodata": "flat", "nodeset": "three", **FAR})
+        run = daemon.run
+        assert await until(lambda: all(
+            daemon.stations.get(n) and daemon.stations[n].status == "up" for n in "abc"))
+        setup = lines_of(run, "a")
+        await daemon.do_node_stop({"name": "a", "id": "off"})
+        assert "a" not in daemon.stations and "a" in daemon.nodeset.nodes
+        assert "a" in daemon.ether.names.values()
+        said = [m for m in daemon.said if m.get("name") == "a"]
+        assert said[-2]["type"] == "node" and said[-2]["status"] == "stopped"
+        assert said[-1]["type"] == "command_result" and said[-1]["results"] == {"a": "off"}
+        await asyncio.sleep(0.3)
+        assert "a" not in daemon.stations                  # no supervisor brings it back
+        await daemon.do_node_stop({"name": "a"})            # off already: nothing
+        await daemon.do_node_start({"name": "a", "id": "on"})
+        assert await until(lambda: daemon.stations.get("a") and
+                           daemon.stations["a"].status == "up")
+        assert lines_of(run, "a") == setup                  # its state kept: not set up again
+        await daemon.do_node_start({"name": "a"})           # running: left as it is
+        assert daemon.stations["a"].starts == 1
+        with open(os.path.join(run.dir, simd.EVENTS_FILE)) as handle:
+            power = [json.loads(line) for line in handle if '"power"' in line]
+        assert [(e["node"], e["on"]) for e in power] == [("a", False), ("a", True)]
+        with pytest.raises(store.StoreError):                # refused, as any unknown node
+            await daemon.do_node_stop({"name": "nobody"})
+        await daemon.stop_all(flush=False)
+        daemon.ether.close()
+    asyncio.run(go())
+
+
+def test_a_node_powered_off_in_a_virtual_run_leaves_t_at_the_next_barrier(stores, monkeypatch):
+    """node_stop in a virtual run: the station leaves T in one callback at T's
+    next barrier (now, before the stations' own events of that T), marked
+    stopping, and only then is its process stopped; the others stay."""
+    import types
+
+    async def go():
+        daemon = make_simd(stores, "--time", "max")
+        due, left, stopped = [], [], []
+        daemon.ether = types.SimpleNamespace(
+            clock=types.SimpleNamespace(virtual=True), now=lambda: 7_000_000, kick=lambda: None,
+            call_at=lambda t, callback, key=0: due.append((t, key, callback)))
+        daemon.nodeset = types.SimpleNamespace(node=lambda name: {}, nodes={})
+        daemon.run = object()
+        daemon.station_event = lambda station, event, fields: None
+        daemon.node_message = lambda name: {"type": "node", "name": name}
+
+        def station(name):
+            one = types.SimpleNamespace(name=name, stopping=False)
+            one.leave = lambda: left.append((name, one.stopping, list(stopped)))
+            return one
+        daemon.stations = {name: station(name) for name in "ab"}
+
+        async def stop_station(name, flush=True):
+            stopped.append((name, flush))
+            daemon.stations.pop(name)
+        daemon.stop_station = stop_station
+        stopping = asyncio.ensure_future(daemon.do_node_stop({"name": "a"}))
+        await asyncio.sleep(0)
+        assert [(t, key) for t, key, _ in due] == [(7_000_000, -1)] and not left
+        due[0][2]()
+        await stopping
+        return left, stopped, sorted(daemon.stations)
+    assert asyncio.run(go()) == ([("a", True, [])], [("a", False)], ["b"])
+
+
 def test_a_role_the_station_forgets_is_said_again_after_a_reset(stores, monkeypatch):
     monkeypatch.setattr(ReticulumDriver, "role_volatile", True)
 
@@ -884,3 +996,20 @@ def test_a_tool_that_ends_as_its_wait_times_out_is_a_tool_that_gave_no_answer(mo
     from sim_mesh import driver
     with pytest.raises(driver.CommandError, match="gave no answer"):
         asyncio.run(driver.run_tool(["/bin/true"], 0.05))
+
+
+def test_a_backbone_has_a_table_of_its_own_in_the_run(stores, monkeypatch):
+    """T127: with SIM_MESH_BACKBONE naming two nodes, the run holds a table for
+    the backbone's band beside the mesh's, the two of them only, and the
+    medium is handed both."""
+    monkeypatch.setenv("SIM_MESH_BACKBONE", "a,c")
+
+    async def go():
+        daemon = make_simd(stores)
+        await daemon.start_ether()
+        await daemon.do_sim_load({"geodata": "flat", "nodeset": "three"})
+        assert daemon.run.bands() == ["433", "868"]
+        assert daemon.tables["433"].names == ["a", "c"]
+        assert sorted(daemon.tables) == ["433", "868"]
+        daemon.ether.close()
+    asyncio.run(go())

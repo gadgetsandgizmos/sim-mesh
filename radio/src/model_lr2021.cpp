@@ -405,7 +405,6 @@ struct simradio {
 
 namespace {
 
-constexpr int kMaxSlots = 8;
 simradio* s_chips[kMaxSlots] = {};
 
 struct PinCall {

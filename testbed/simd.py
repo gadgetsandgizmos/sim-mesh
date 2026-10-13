@@ -104,6 +104,9 @@ sequence {steps: [command | meta], name? | names? | tag?, base?, after?, id?}
                                                     those one after another at one T, answered
                                                     once with a list of results
 node_reset {name} · node_factory_reset {name} · reset_all · factory_reset_all
+node_stop {name, after?, id?} · node_start {name, after?, id?}
+                                                    power off (stopped until started, state kept,
+                                                    nothing flushed) and on
 start_all · stop_all
 plan {phases: [{name, until}]}                      a driver's phases, T in µs
 script_loglevel {level}                             how much the scripts on it log, unless
@@ -945,9 +948,45 @@ class Simd:
             self.starter = None
 
     async def stop_all(self, flush=True):
+        """Every station stopped, flushed first. In a virtual run they leave T
+        together (leave_together) before any process is touched."""
         self.cancel_start()
-        await asyncio.gather(*(self.stop_station(name, flush)
+        if flush:
+            await self.flush_all()
+        await self.leave_together()
+        await asyncio.gather(*(self.stop_station(name, flush=False)
                                for name in list(self.stations)))
+
+    async def leave_together(self, stations=None):
+        """In a virtual run, every station (or those given) leaves T at its
+        next barrier: the instant they are all idle and what they said has
+        been taken, before T moves on and before any is sent its next instant.
+        Stopped one by one, on the host's time, the others ran on meanwhile,
+        and how far into the record they got was the host's to say: two runs
+        of one cell parted there. Each is marked stopping, so none that exits
+        before its own stop is started again. Bounded, as every wait of a stop
+        is: a run that reaches no barrier (a driver holding T, a station that
+        never idles) is stopped as before."""
+        leaving = list(self.stations.values() if stations is None else stations)
+        if not self.virtual or not leaving:
+            return
+        reached = asyncio.get_running_loop().create_future()
+
+        def barrier():
+            if reached.done():
+                return
+            for station in leaving:
+                station.stopping = True
+                station.leave()
+            reached.set_result(None)
+        self.ether.call_at(self.ether.now(), barrier, key=-1)
+        self.ether.kick()
+        try:
+            await asyncio.wait_for(asyncio.shield(reached), SHUTDOWN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            reached.cancel()
+            log("the stations met no barrier in %.0f s: stopped where each was"
+                % SHUTDOWN_TIMEOUT_S)
 
     # ---- the role poll ---------------------------------------------------
 
@@ -1476,6 +1515,43 @@ class Simd:
             await self.flush_station(station)
             await station.restart()
 
+    async def do_node_stop(self, msg):
+        """Power off: the station stops and stays stopped until `node_start`.
+        The node stays in the nodeset and the medium, which hears nothing from
+        it meanwhile. Nothing is flushed, as nothing is when the power goes:
+        it comes back with what its store holds. In a virtual run it leaves T
+        at the next barrier (leave_together), at the instant the message is
+        acted on (`after`), so the cut is the same in every run."""
+        self.need_run()
+        name = msg["name"]
+        self.nodeset.node(name)
+        station = self.stations.get(name)
+        if station is not None:
+            self.station_event(station, "power", {"on": False})
+            log("%s powered off at t %.6f s" % (name, self.ether.now() / 1e6))
+            await self.leave_together([station])
+            await self.stop_station(name, flush=False)
+            self.broadcast(self.node_message(name))
+        if msg.get("id") is not None:
+            self.answered(msg, {name: "off"})
+
+    async def do_node_start(self, msg):
+        """Power on a node whose station is stopped: it boots from its state,
+        as after a power cut (or set up afresh where it has none), and T waits
+        for it from this instant (Station.run). A running station is left as
+        it is: pressing reset is `node_reset`."""
+        self.need_run()
+        name = msg["name"]
+        self.nodeset.node(name)
+        if name not in self.stations:
+            log("%s powered on at t %.6f s" % (name, self.ether.now() / 1e6))
+            await self.start_station(name)
+            station = self.stations.get(name)
+            if station is not None:
+                self.station_event(station, "power", {"on": True})
+        if msg.get("id") is not None:
+            self.answered(msg, {name: "on" if name in self.stations else "nothing to run"})
+
     async def do_node_factory_reset(self, msg):
         """Throw away a station's state and start it again, set up afresh.
 
@@ -1823,6 +1899,9 @@ class Simd:
         await self.stop_all()
         for name in (self.nodeset.nodes if self.nodeset else ()):
             self.broadcast(self.node_message(name))
+        if msg.get("id") is not None:
+            # A driver's (Sim.stop_all): it goes on once every station has stopped.
+            self.answered(msg, {})
 
     async def do_levels(self, msg):
         """What the others would hear from one station, for the hover card.
@@ -1923,8 +2002,14 @@ class Simd:
         for band in losses_module.bands_of(ns, gd):
             tables[band], _ = await losses_module.compute(gd, ns, band, sidecar,
                                                           self.progress(band), notice=log)
+        backbone = losses_module.backbone_table(gd, ns, tables)
         run = runs_module.create_run(free_run_dir(self.run_base), gd, ns, script_name,
                                      self.args.time, tables)
+        if backbone is not None:
+            # Into the run's own copy, which `adopt` reads: never the cache,
+            # which holds what the model computed.
+            losses_module.write_table(backbone, run.table_path(backbone.band))
+            log("backbone: %s at %d Hz" % (", ".join(backbone.names), backbone.f0_hz))
         run.set(build=msg.get("build") or None, build_tag=msg.get("build_tag") or None,
                 firmware_rules=list(msg.get("firmware_rules") or []),
                 first_boot_rules=list(msg.get("first_boot_rules") or []))

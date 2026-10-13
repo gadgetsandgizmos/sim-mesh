@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <sys/socket.h>
@@ -306,10 +307,24 @@ extern "C" int simradio_station_open(int sid, const char* bind_addr, const char*
         return -1;
     }
 
-    char hello[160];
+    /* Every slot a radio of this station will use, 0 up: SIM_MESH_RADIO_SLOTS
+     * of them (a board with a second radio says 2), one when unset. The
+     * ether tells a frame only to the slots a station listed, and a second
+     * hello is a restart, so all are said here, before a chip is opened. */
+    int nSlots = 1;
+    if (const char* e = getenv("SIM_MESH_RADIO_SLOTS")) {
+        int v = atoi(e);
+        if (v >= 1 && v <= kMaxSlots) nSlots = v;
+    }
+    char slots[2 * kMaxSlots] = "0";
+    for (int i = 1; i < nSlots; i++) {
+        size_t at = strlen(slots);
+        snprintf(slots + at, sizeof slots - at, ",%d", i);
+    }
+    char hello[192];
     int n = snprintf(hello, sizeof hello,
-        "{\"type\":\"hello\",\"sid\":%d,\"t\":%lld,\"slots\":[0],\"lines\":1}",
-        s_sid, (long long)S()->now_us());
+        "{\"type\":\"hello\",\"sid\":%d,\"t\":%lld,\"slots\":[%s],\"lines\":1}",
+        s_sid, (long long)S()->now_us(), slots);
     sendRaw(hello, (size_t)n);
     S()->log(SIMRADIO_LOG_INFO, "ether: %s, station %d", ether_addr, s_sid);
     if (conductor::isVirtual()) {

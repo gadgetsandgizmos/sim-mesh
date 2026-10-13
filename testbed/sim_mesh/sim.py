@@ -50,6 +50,8 @@ held back `after` seconds, and answers {name: reply}:
   with a category, only on its stations of that category. A firmware that
   cannot do one answers `! …` for that station;
 - `reset()`, `factory_reset()`: pressed on each.
+- `power(on)`: each one's power off (its station stopped until it is
+  powered on again, its state kept) or on (a stopped one boots from it).
 
 `attach(name)` holds a running simulation; `start(geodata, nodesets, …)`
 asks the front for a new one, with its time and its firmware and first-boot
@@ -160,6 +162,11 @@ class Selection:
     async def factory_reset(self, after=0.0):
         for name in self.names:
             await self.sim.send(_later({"type": "node_factory_reset", "name": name}, after))
+
+    async def power(self, on, after=0.0):
+        for name in self.names:
+            await self.sim.send(_later({"type": "node_start" if on else "node_stop",
+                                        "name": name}, after))
 
 
 def _later(msg, after):
@@ -507,6 +514,12 @@ class Sim:
 
     def wait_run(self, at):
         return self.until(at)
+
+    async def stop_all(self):
+        """Every station stopped, the simulation kept (simd's stop_all). In a
+        virtual run they leave T together at the next barrier, so the run's
+        record ends at this T, the same in every run."""
+        await self._wait({"type": "stop_all"})
 
     async def stop(self):
         """Stop the simulation itself, through the front."""

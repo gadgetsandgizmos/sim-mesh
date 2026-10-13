@@ -232,6 +232,21 @@ def test_the_band_is_the_one_globals_carrier_falls_in(stores):
     assert losses.bands_of(ns, radio=dict(radio, freq_mhz=915.0)) == ["915"]
 
 
+def test_a_backbone_is_a_band_of_its_own_among_its_members_only(stores):
+    gd, ns = geodata.load("flat"), nodeset.load("three")
+    a, b, c = list(ns.nodes)[:3]
+    env = {"SIM_MESH_BACKBONE": "%s,%s,nobody" % (a, b)}
+    table = losses.backbone_table(gd, ns, ["868"], env)
+    assert table.band == "433" and table.names == [a, b]
+    assert table.get(a, b) == table.get(b, a) == losses.BACKBONE_LOSS_DB
+    assert c not in table.index
+    # One member, or none, is no backbone; a carrier in a band the run has is refused.
+    assert losses.backbone_table(gd, ns, ["868"], {"SIM_MESH_BACKBONE": a}) is None
+    assert losses.backbone_table(gd, ns, ["868"], {}) is None
+    with pytest.raises(losses.LossError):
+        losses.backbone_table(gd, ns, ["868"], dict(env, SIM_MESH_BACKBONE_RADIO="869000000,5,500"))
+
+
 def test_a_table_round_trips_through_slt1(stores, tmp_path):
     gd, ns = geodata.load("flat"), nodeset.load("three")
     table = losses.synthetic_table(gd, ns, "433")
