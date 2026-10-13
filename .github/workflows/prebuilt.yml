@@ -1,0 +1,178 @@
+# sim-mesh's image and its prebuilt outputs, published to the owner's GitHub
+# container registry (ghcr.io/<owner>/sim-mesh, ghcr.io/<owner>/sim-mesh-prebuilt),
+# for x86_64 and aarch64, each on a runner of its own architecture.
+#
+#   names      the registry names and the image's key; whether the image is published
+#   image      the image for one architecture, ghcr.io/<owner>/sim-mesh:<key>-<arch>
+#   manifest   ghcr.io/<owner>/sim-mesh:<key>, both architectures under one name
+#   outputs    for each component whose tag is not published: built in the
+#              development image (`sim build`), packed and pushed
+#              (testbed/prebuilt.py); the page on x86_64 only, it is the same
+#              on both
+#   retention  weekly: the newest 400 prebuilt versions kept. The image's
+#              package keeps everything: a tag's per-architecture manifests
+#              are untagged versions, and deleting one breaks the tag.
+#
+# Everything is skipped that is published already, so a push that changes one
+# component builds that one. The names are the owner's, so a fork publishes to
+# its own registry.
+name: prebuilt
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - Dockerfile.dev
+      - radio/**
+      - ether/core/**
+      - planner/**
+      - testbed/ui/**
+      - testbed/prebuilt.py
+      - sim
+      - .github/workflows/prebuilt.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: prebuilt
+  cancel-in-progress: false
+
+jobs:
+  names:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.names.outputs.image }}
+      prebuilt: ${{ steps.names.outputs.prebuilt }}
+      rkey: ${{ steps.names.outputs.rkey }}
+      published: ${{ steps.names.outputs.published }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: names
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The registry wants lower case; an owner may have capitals.
+          owner=$(tr '[:upper:]' '[:lower:]' <<< "${{ github.repository_owner }}")
+          rkey=$(python3 testbed/prebuilt.py image-key)
+          echo "image=ghcr.io/$owner/sim-mesh" >> "$GITHUB_OUTPUT"
+          echo "prebuilt=ghcr.io/$owner/sim-mesh-prebuilt" >> "$GITHUB_OUTPUT"
+          echo "rkey=$rkey" >> "$GITHUB_OUTPUT"
+          docker login ghcr.io -u "${{ github.actor }}" --password-stdin <<< "$GITHUB_TOKEN"
+          if docker manifest inspect "ghcr.io/$owner/sim-mesh:$rkey" > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  image:
+    needs: names
+    if: needs.names.outputs.published != 'true'
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    env:
+      NAME: ${{ needs.names.outputs.image }}:${{ needs.names.outputs.rkey }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: build and push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker login ghcr.io -u "${{ github.actor }}" --password-stdin <<< "$GITHUB_TOKEN"
+          docker build -f Dockerfile -t "$NAME" .
+          docker image ls "$NAME"
+          docker push "$NAME"
+
+  manifest:
+    needs: [names, image]
+    if: needs.names.outputs.published != 'true'
+    runs-on: ubuntu-24.04
+    env:
+      NAME: ${{ needs.names.outputs.image }}:${{ needs.names.outputs.rkey }}
+    steps:
+      - name: both architectures under one name
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker login ghcr.io -u "${{ github.actor }}" --password-stdin <<< "$GITHUB_TOKEN"
+          docker buildx imagetools create -t "$NAME" "$NAME-x86_64" "$NAME-aarch64"
+          docker buildx imagetools inspect "$NAME"
+
+  outputs:
+    needs: [names, manifest]
+    if: ${{ !cancelled() && !failure() && github.event_name != 'schedule' }}
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, components: radio ether planner page }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, components: radio ether planner }
+    runs-on: ${{ matrix.runner }}
+    env:
+      IMAGE: ${{ needs.names.outputs.image }}:${{ needs.names.outputs.rkey }}
+      SIM_MESH_PREBUILT: ${{ needs.names.outputs.prebuilt }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oras-project/setup-oras@v1
+      - name: log in
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker login ghcr.io -u "${{ github.actor }}" --password-stdin <<< "$GITHUB_TOKEN"
+          oras login ghcr.io -u "${{ github.actor }}" --password-stdin <<< "$GITHUB_TOKEN"
+      - name: what is not published
+        id: todo
+        run: |
+          todo=
+          for c in ${{ matrix.components }}; do
+            tag=$(python3 testbed/prebuilt.py tag "$c")
+            if oras manifest fetch "$SIM_MESH_PREBUILT:$tag" > /dev/null 2>&1; then
+              echo "$tag is published"
+            else
+              echo "$tag is not published"
+              todo="$todo $c"
+              echo "$tag" >> tags
+            fi
+          done
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+      - name: build in the development image
+        if: steps.todo.outputs.todo != ''
+        run: |
+          docker pull "$IMAGE"
+          docker build --build-arg "BASE=$IMAGE" -f Dockerfile.dev -t sim-mesh-dev .
+          docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:$PWD" -w "$PWD" \
+              -e HOME=/tmp -e SIM_MESH_IN_CONTAINER=1 \
+              sim-mesh-dev ./sim build ${{ steps.todo.outputs.todo }}
+      - name: pack and push
+        if: steps.todo.outputs.todo != ''
+        run: |
+          for c in ${{ steps.todo.outputs.todo }}; do
+            packed=$(python3 testbed/prebuilt.py pack "$c" --out out)
+            tag=$(basename "$packed" .tar.gz)
+            # A build that changed its own sources (a lock file rewritten)
+            # would publish under a key no checkout has.
+            grep -qxF "$tag" tags || { echo "building $c changed its sources: $tag"; exit 1; }
+            ls -l "$packed"
+            (cd out && oras push "$SIM_MESH_PREBUILT:$tag" \
+                --artifact-type application/vnd.sim-mesh.prebuilt.v1 \
+                "$tag.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip")
+          done
+
+  retention:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: sim-mesh-prebuilt
+          package-type: container
+          min-versions-to-keep: 400

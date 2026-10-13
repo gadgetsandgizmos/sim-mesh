@@ -1,0 +1,44 @@
+# sim-mesh's development image: the image (Dockerfile) and every toolchain
+# that builds what sim-mesh compiles. `sim dev` and `sim build` build it on
+# first use, from the image `sim` uses (BASE), and run in it; it is never
+# published. Plain `sim` runs in it too in a checkout either has been run in.
+#
+# Adds:
+#   - pytest (the host test suites)
+#   - Node 22 and npm (the page's Quasar/Vite build; Vite needs a newer Node
+#     than Ubuntu ships)
+#   - gcc, g++, make and cmake (the radio libraries and the time shim)
+#   - cargo via rustup, with the wasm32 target (the planner, the ether's
+#     conductor)
+#   - Ruby and bundler (`sim dev`'s Jekyll preview of the site, sim-mesh.net;
+#     the image's UTF-8 locale is what lets Sass read the site theme's
+#     stylesheet)
+#   - git, curl
+ARG BASE
+FROM ${BASE}
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        curl gnupg git python3-pytest \
+        build-essential cmake pkg-config \
+        ruby-dev ruby-bundler zlib1g-dev; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends nodejs; \
+    rm -rf /var/lib/apt/lists/*
+
+# Rust in a shared location, writable by whatever uid `sim` runs the
+# container as (the host user's, so what it builds in the mounted tree is
+# theirs), so cargo can fetch crates at build time.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN set -eux; \
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal; \
+    rustup target add wasm32-unknown-unknown; \
+    chmod -R a+rwX "$RUSTUP_HOME" "$CARGO_HOME"

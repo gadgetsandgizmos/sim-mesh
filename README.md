@@ -57,21 +57,41 @@ sim-mesh needs no firmware tree: stations are firmware zips, added from a
 file or from the pre-built ones on [sim-mesh.net](https://sim-mesh.net/firmware/).
 
 It needs **Docker or Podman** and nothing else, on Linux, a Mac or Windows:
-`sim` builds its own image on first use (a few minutes, once) and runs
-everything inside it, with port 8800 published. The image is the system a
-firmware runs on, the same everywhere. `SIM_MESH_NATIVE=1` runs it on the
-machine instead, for working on sim-mesh itself on Linux: that needs
-`python3` with `aiohttp` and `pyyaml`, `node` and `npm`, `cmake` with a C
-and C++ compiler, and `cargo` for real ground and the ether's conductor.
+`sim` pulls its own image on first use (about 50 MB) and runs everything
+inside it, with port 8800 published. The image is the system a firmware
+runs on, the same everywhere, and holds nothing else. What sim-mesh
+compiles — the page, the virtual radios, the ether's conductor and the
+planner — it fetches prebuilt for the sources in the tree, a few MB.
+Working on sim-mesh itself, `sim dev` and `sim build` build from source in
+the development image, which adds Node, a C toolchain, cmake, Rust and Ruby
+(about 1.5 GB), built on your machine the first time either runs. After that,
+plain `sim` in that clone runs in the development image too, so whatever
+you edit is built from source as it starts; deleting `sim-mesh/.dev` goes
+back to the image.
 
-On a fresh Debian, Ubuntu or Fedora, `sim-mesh/sim install` puts that in
-place as the image holds it: the system's packages through apt or dnf (with
-sudo); a Node the page's build takes (22.22 or later) where the system's is
-older, NodeSource's 22 on Debian and Ubuntu, which ship 18, and on Fedora,
-whose default is 22.21, its own nodejs24, given its plain names in a Python
+On Linux, `sim-mesh/sim install` runs sim-mesh on the machine instead of in
+a container. It puts in place what the image holds — `python3` with
+`aiohttp` and `pyyaml`, the C++ runtime — through apt or dnf (with sudo),
+and fetches the prebuilt binaries, which need the C library of Ubuntu 24.04
+or later (glibc 2.39). `sim install --dev` adds what the development image
+holds and builds whatever is not prebuilt here, on an older system too: a
+Node the page's build takes (22.22 or later) where the system's is older,
+NodeSource's 22 on Debian and Ubuntu, which ship 18, and on Fedora, whose
+default is 22.21, its own nodejs24, given its plain names in a Python
 environment beside the clone, `sim-mesh/.venv`, which `sim` puts first on
-the path; and Rust through rustup. A step whose result is there already is
-left out; `--dry-run` says what it would do.
+the path; `cmake` with a C and C++ compiler; and Rust through rustup. A step
+whose result is there already is left out; `--dry-run` says what it would
+do. Either leaves `sim-mesh/.native`: from then on plain `sim` runs on the
+machine. `SIM_MESH_NATIVE=0` runs it in the container all the same, and
+`SIM_MESH_NATIVE=1` on the machine without `.native`. Natively, `sim dev`
+needs what `sim install --dev` installs, and says so when it is missing.
+
+`SIM_MESH_IMAGE_REPO` names another repository to pull the image from
+(default `ghcr.io/sim-mesh/sim-mesh`), and `SIM_MESH_PREBUILT` another to
+fetch the prebuilt outputs from (default `ghcr.io/sim-mesh/sim-mesh-prebuilt`):
+a fork publishes both to its own (`.github/workflows/prebuilt.yml`).
+`sim` removes the images of earlier Dockerfiles itself, by name; it never
+prunes, which would take your other images with them.
 
 **1. Clone it.** The directory you clone into is the one `sim` mounts
 into its image, so a firmware tree put beside sim-mesh later can build
@@ -93,13 +113,14 @@ sim-mesh\sim.ps1` does the same with Docker Desktop or Podman: it starts the
 front, and every other verb runs inside it,
 `docker exec -it sim-mesh-front ./sim <verb>`.
 
-It builds whichever of the page, the virtual radios, the ether's conductor
-and the planner (sim-mesh's own, in `planner/`; without cargo the last two
-are left out, sim says so, synthetic ground works, and a virtual-time run is
-refused until the conductor is built; real time needs none) is not
-built yet or is older than a file of its sources (hidden directories and
-`__pycache__` aside), so a fresh clone or a pull needs nothing more, then
-starts the front and opens
+It fetches whichever of the page, the virtual radios, the ether's conductor
+and the planner (sim-mesh's own, in `planner/`) is not there yet or not of
+its sources (hidden entries and `__pycache__` aside), prebuilt for exactly
+those sources, so a fresh clone or a pull needs nothing more; what is not
+prebuilt (sources you edited) is built where the toolchain is, and
+otherwise said, with what works without it: synthetic ground without the
+planner, real time without the conductor (a virtual-time run is refused).
+Then it starts the front and opens
 `http://localhost:8800/`. The terminal is the
 testbed's: Ctrl-C there stops every simulation and everything they started.
 
@@ -882,8 +903,9 @@ a **sidecar**: one per pack in use, started by the front on a free loopback
 port when the first simulation or page opens geodata on that pack, and
 stopped when the last one lets go. The page reaches it as
 `/planner/<geodata>/…` on port 8800. Beside it, `planner-job` is the
-compiler and the node-map importer, run once per job. `sim` builds both
-with cargo as it starts (in sim-mesh's image on a machine that is not Linux).
+compiler and the node-map importer, run once per job. `sim` fetches both
+prebuilt as it starts, or builds them with cargo where they are not
+prebuilt (in the development image, or natively after `sim install --dev`).
 Not built, a pack is refused with the sentence saying so, and synthetic
 ground works.
 
@@ -2362,14 +2384,15 @@ process's (`radio/backend/posix/`: `std::thread`, `CLOCK_MONOTONIC`, a
 ESP-IDF's Linux host target) hands it its own with `simradio_set_services`
 before anything else, from its own code.
 
-`sim` builds them as it starts (`radio/build/`: `libsimradio-sx1262.so`,
-`libsimclock.so`); a station is given the radio from there, and a virtual
-run preloads the shim from there.
+`sim` fetches them prebuilt or builds them as it starts (`radio/build/`:
+`libsimradio-sx1262.so`, `libsimradio-lr2021.so`, `libsimclock.so`); a
+station is given the radio from there, and a virtual run preloads the shim
+from there.
 
 ## Working on the page
 
-The page is built when `sim` starts, so an edit to it shows only after a
-restart. `sim dev` instead runs the page's development server (`quasar dev`)
+The page is fetched or built when `sim` starts, so an edit to it shows only
+after a restart. `sim dev` instead runs the page's development server (`quasar dev`)
 inside, beside the front, and the front passes the page through from it on
 the same port, 8800, live-reload included: each edit is in the browser at
 once. The front's own Python is read when it starts, so a change to it still
@@ -2383,7 +2406,10 @@ gems go into `~/.cache/sim-mesh/site-gems`, the first time it starts.
 
 ## Tests
 
-None needs firmware, a planner or a network:
+They run natively after `sim install --dev`, or in the development image
+that `sim dev` and `sim build` make (`sim-mesh-dev:<key>`, as `docker images`
+or `podman images` lists it), with the clone mounted. None needs firmware, a
+planner or a network:
 
 ```sh
 cd sim-mesh/testbed && python3 -m pytest -q      # the stores, firmware, the front, simd, the drivers, the library, the tools
@@ -2424,8 +2450,11 @@ tests, in place of `testbed/geodata/.cache/meshcore/nodes.json`.
 
 | Where | What |
 |---|---|
-| `sim` | the one command: the front natively or in sim-mesh's image (building what is stale first), `new`, `stop`, `pause`, `resume`, `list`, `plan`, `run`, `firmware` |
-| `Dockerfile` | sim-mesh's image, which everything runs in: the system a firmware may count on |
+| `sim` | the one command: the front natively or in sim-mesh's image (fetching or building what is stale first), `new`, `stop`, `pause`, `resume`, `list`, `plan`, `run`, `firmware`, `build`, `install` |
+| `Dockerfile` | sim-mesh's image, which everything runs in: the system a firmware may count on, and nothing else |
+| `Dockerfile.dev` | the development image: the image with the toolchains that build sim-mesh, for `sim dev` and `sim build` |
+| `testbed/prebuilt.py` | the prebuilt outputs: each component's key, freshness, the fetch from the registry, the pack CI publishes |
+| `.github/workflows/prebuilt.yml` | publishes the image and the prebuilt outputs, for x86_64 and aarch64 |
 | `radio/` | the virtual SX1262 and the station's UDP link to the ether, as a shared library |
 | `radio/src/conductor.cpp` | the station's side of virtual time: T, node time, wakes, the idle |
 | `radio/shim/simclock.c` | `libsimclock.so`, the C library's time in node time (its sleeps, descriptor waits, condition and semaphore waits), the seeded randomness, the console and TCP counts, the listening sockets and the watchdog's hold; `radio/include/simclock.h` is what it is handed |

@@ -1,3 +1,4 @@
-# The image copies nothing from the tree; the build context is only the Dockerfile.
+# The image copies nothing from the tree; the build context is only the Dockerfiles.
 *
 !Dockerfile
+!Dockerfile.dev

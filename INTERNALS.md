@@ -95,14 +95,56 @@ image is that system: Ubuntu 24.04 (its C library and C++ runtime; a zip
 brings everything else); the host's own architecture, because a firmware
 runs only on the one it was built for; CPython 3.12 with aiohttp and
 pyyaml, for sim-mesh, every driver, and a firmware written in Python that
-brings its packages but not an interpreter; Node for the page, a C
-toolchain and cmake for the virtual radios, cargo for the planner. Running
-natively (`SIM_MESH_NATIVE=1`) is for working on sim-mesh itself. The image
-is small on purpose and is not a firmware build container.
+brings its packages but not an interpreter. That, what the contract
+promises a station, and nothing else: no toolchain, so the image a user
+pulls is tens of MB, not gigabytes. It is not a firmware build container.
 It copies nothing from the tree. `sim` mounts the directory holding
 sim-mesh at its own path, and runs as the host's user, so what it writes is
-theirs. The image is tagged by the Dockerfile's checksum and rebuilt when it
-changes.
+theirs. The image is tagged by the first 12 hex digits of the Dockerfile's
+sha256, the same in `sim` and `sim.ps1`, and pulled from the registry under
+that name; a Dockerfile not published (or no network) builds it locally
+under the same name, so the next start finds it either way. Every file is
+checked out with LF (`.gitattributes`), so the same Dockerfile is the same
+name on every OS.
+
+**The toolchains are the development image's.** Node for the page, a C
+toolchain and cmake for the virtual radios, cargo for the planner and the
+conductor, Ruby for the site: `Dockerfile.dev`, built `FROM` the image, on
+the user's machine, the first time `sim dev` or `sim build` runs; never
+published. Those two leave `.dev` in the checkout, and plain `sim` there runs
+in the development image too: a checkout that has been worked on keeps
+building its edits. Running natively (`sim install`, which leaves
+`.native`) is the same split: `sim install` the image's packages,
+`sim install --dev` the development image's.
+
+**What sim-mesh compiles is prebuilt per source hash.** The radio
+libraries and the shim, the conductor, the planner's binaries, the page:
+each is built from one directory of the tree, and keyed by a hash of that
+directory's files (paths, sizes, bytes; for the native ones, the image's
+key too, since they are linked against its C library). CI publishes each
+key's outputs as an OCI artifact in the registry beside the image
+(`testbed/prebuilt.py`, `.github/workflows/prebuilt.yml`); `sim` fetches the
+key it has, checks the digest, unpacks into the tree where a local build
+leaves the same files, and stamps the output directory with the key. A
+source changed here is a key nobody published: built where the toolchain
+is, and otherwise said, with what runs without it. The outputs live in the
+tree, not the image, because a firmware links against
+`radio/build/libsimradio-sx1262.so` in the tree and a native install has no
+image. A registry, not release assets: a GitHub release holds at most 1000
+assets, and these directories change more than a hundred times a month; the
+registry has no cap, its digests are the sha256, and its pulls are
+anonymous. The image's package is never pruned (a multi-architecture tag's
+per-architecture manifests are untagged versions, and deleting one breaks
+the tag); the prebuilt package keeps its newest 400 versions, and an older
+key falls back like an unpublished one.
+
+**`sim` removes its own images, by name, and nothing else.** Each
+Dockerfile change is a new image; `sim` removes every other tag of the
+image's repository and every other development image as it starts (and the
+names an earlier `sim` and `sim.ps1` gave them). Never `image prune`,
+`builder prune` or `system prune`: those take the user's other images and
+build cache with them. An image a running container uses refuses, and
+stays until the next start.
 
 **A firmware's name is its base, its architecture and its version**, and
 nothing else is read from it. `<base>_latest` is the newest of exactly that

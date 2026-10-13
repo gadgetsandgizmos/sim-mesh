@@ -284,7 +284,7 @@ def written_by_the_ether(path, medium):
     sockets here that answer as the plan says. The run is over when every
     station is idle and nothing is due: nothing then can move T."""
     if not os.path.exists(ether_module.CORE_PATH):
-        pytest.fail("no ether core built (sim-mesh build ether)")
+        pytest.fail("no ether core built (sim build ether)")
     numbered = {}
     plan = {1: [(1000, 200), (2000, 200), (3000, 100)], 2: [(1000, 200), (2000, 150)],
             3: [(1000, 200), (2050, 200)], 4: [(1000, 200), (2000, 200), (3000, 100)]}

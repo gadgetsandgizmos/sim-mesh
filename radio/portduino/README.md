@@ -84,7 +84,7 @@ next loop's read sees it rise.
 
 ## Building with it
 
-`sim` builds `radio/build/libsimradio-sx1262.so` as it starts, which
+`sim` fetches or builds `radio/build/libsimradio-sx1262.so` as it starts, which
 `link.py` links the program with by name; the firmware's zip does not carry
 it, since sim-mesh provides it when it starts the station. A firmware's
 environment lists this library with a `symlink://` entry in `lib_deps`.
