@@ -144,6 +144,7 @@ async def refuse(writer, status, text):
 async def handle(client_reader, client_writer, resolve):
     peer = client_writer.get_extra_info("peername")
     upstream_writer = None
+    tasks = []
     try:
         head = await read_head(client_reader)
         if not head:
@@ -174,11 +175,19 @@ async def handle(client_reader, client_writer, resolve):
 
         upstream_writer.write(head)
         await upstream_writer.drain()
-        await asyncio.gather(pump(client_reader, upstream_writer),
-                             pump(upstream_reader, client_writer))
+        tasks = [asyncio.ensure_future(pump(client_reader, upstream_writer)),
+                 asyncio.ensure_future(pump(upstream_reader, client_writer))]
+        await asyncio.gather(*tasks)
     except (ConnectionError, asyncio.CancelledError):
         pass
     finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, ConnectionError):
+                pass
         for writer in (upstream_writer, client_writer):
             if writer is not None:
                 try:

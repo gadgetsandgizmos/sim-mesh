@@ -465,6 +465,20 @@ def test_the_editors_list_open_and_save(stores):
     running_front(check)
 
 
+def test_verb_answers_even_on_an_exception_it_has_no_specific_case_for(stores, monkeypatch):
+    """A feed cut mid-download left `aiohttp.ClientPayloadError` escaping
+    the editor: verb() must still answer, not leave the page's request
+    hanging on a task nobody awaits."""
+    async def cut_short(cache, lon, lat):
+        raise aiohttp.ClientPayloadError("Response payload is not completed")
+    monkeypatch.setattr(sources, "sources_at", cut_short)
+
+    async def check(f, session, base, ws):
+        reply = await ask(ws, "geodata_sources_at", lon=13.4, lat=52.5)
+        assert not reply["ok"] and "not completed" in reply["error"]
+    running_front(check)
+
+
 def test_a_geodata_delete_says_and_takes_what_stands_on_it(stores):
     pack = pathlib.Path(geodata.geodata_dir("berlin"))
     pack.mkdir()
@@ -859,4 +873,57 @@ def test_the_planner_is_started_for_a_pack_and_passed_through(tmp_path, monkeypa
                 break
             await asyncio.sleep(0.05)
         assert car.process.returncode is not None and not f.sidecars.by_pack
+    running_front(check)
+
+
+def test_a_browser_gone_during_the_planner_proxy_ends_quietly(stores, monkeypatch, capsys):
+    """Panning the map drops the request before the proxy answers: the
+    write back to the browser then raises ConnectionResetError. A client
+    that has gone is normal and must not become a traceback."""
+    monkeypatch.setattr(front, "planner_web", lambda: "/usr/bin/true")
+    pack = stores / "pack"
+    pack.mkdir()
+    (pack / "manifest.json").write_text(json.dumps(
+        {"region": {"crs_epsg": 32633, "bbox": [13.3, 52.4, 13.5, 52.6]}}))
+    geodata.write(geodata.geodata_path("tile-src"), {"pack": str(pack)})
+
+    async def slow_tile(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        try:
+            for _ in range(60):
+                await resp.write(b"x" * 2048)
+                await asyncio.sleep(0.03)
+            await resp.write_eof()
+        except ConnectionError:
+            pass          # the proxy let go of its own side first: fine
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/{tail:.*}", slow_tile)
+
+    async def check(f, session, base, ws):
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        gd = front.load_geodata("tile-src")
+        car = front.Sidecar(gd.pack_dir, port)
+        car.ready.set_result(car.url)
+        f.sidecars.by_pack[gd.pack_dir] = car
+        try:
+            async with aiohttp.ClientSession() as probe:
+                with pytest.raises(asyncio.TimeoutError):
+                    async with probe.get(base + "/planner/tile-src/x.png",
+                                         timeout=aiohttp.ClientTimeout(total=0.1)) as resp:
+                        await resp.read()
+            await asyncio.sleep(0.3)        # the proxy's next write meets the drop
+        finally:
+            await runner.cleanup()
+        err = capsys.readouterr().err
+        assert "the browser is gone" in err
+        assert "Traceback" not in err
+        reply = await ask(ws, "geodata_list")
+        assert "tile-src" in [g["name"] for g in reply["geodata"]]
     running_front(check)

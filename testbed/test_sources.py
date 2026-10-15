@@ -877,3 +877,39 @@ def test_a_file_comes_from_a_mirror_when_the_first_address_fails(tmp_path):
         with pytest.raises(store.StoreError, match="404"):
             await cache.fetch(gone)
     running_host(served, check)
+
+
+def test_a_meta_file_retries_a_payload_cut_short_then_succeeds(tmp_path, monkeypatch):
+    """A feed cut mid-download (`ClientPayloadError`) is a hiccup, not a
+    failure: a few more tries, politely, before meta_file gives up."""
+    monkeypatch.setattr(sources, "BACKOFF_S", 0.01)
+    calls = []
+
+    async def flaky(request):
+        calls.append(request.path)
+        if len(calls) <= 2:
+            resp = web.StreamResponse(headers={"Content-Length": "40"})
+            await resp.prepare(request)
+            await resp.write(b"not all of it")
+            request.transport.close()
+            return resp
+        return web.Response(text="the feed, eventually")
+
+    app = web.Application()
+    app.router.add_get("/feed.atom", flaky)
+
+    async def go():
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        base = "http://127.0.0.1:%d" % runner.addresses[0][1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                cache = sources.Cache(session, str(tmp_path / "cache"))
+                path = await cache.meta_file("feed", base + "/feed.atom")
+                assert open(path, encoding="utf-8").read() == "the feed, eventually"
+        finally:
+            await runner.cleanup()
+    asyncio.run(go())
+    assert len(calls) == 3
