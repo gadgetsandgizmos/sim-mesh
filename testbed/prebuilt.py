@@ -138,7 +138,10 @@ def sources(component):
         rel_dir = "" if rel_dir == "." else rel_dir + "/"
 
         def kept(name):
-            return not (name.startswith(".") or name == "__pycache__"
+            # .cargo holds a component's own build settings (rustflags,
+            # target): they change its outputs, so they belong to its key.
+            hidden = name.startswith(".") and name != ".cargo"
+            return not (hidden or name == "__pycache__"
                         or any(fnmatch.fnmatchcase(rel_dir + name, s) for s in component.skip))
         dirnames[:] = [d for d in dirnames if kept(d)]
         for name in filenames:
@@ -204,13 +207,10 @@ def fresh(component):
     stamp = os.path.join(path(component.out), STAMP)
     if not os.path.isfile(stamp):
         return not newer_source(component, min(os.path.getmtime(o) for o in outputs))
-    if not newer_source(component, os.path.getmtime(stamp)):
-        return True
+    # Always the key, not the mtimes: a source restored with an older mtime
+    # (an archive, rsync -t) is newer in content than the stamp, never in time.
     with open(stamp, encoding="utf-8") as handle:
-        if handle.read().strip() != key(component):
-            return False
-    os.utime(stamp)                     # the mtime check answers next time
-    return True
+        return handle.read().strip() == key(component)
 
 
 # ---- the registry ---------------------------------------------------------------
@@ -218,6 +218,8 @@ def fresh(component):
 def repository():
     """(base URL, repository name) of SIM_MESH_PREBUILT."""
     spec = os.environ.get("SIM_MESH_PREBUILT") or REPOSITORY
+    if spec == "off":
+        raise Unavailable("SIM_MESH_PREBUILT is off: prebuilt outputs are never fetched")
     host, _, name = spec.partition("/")
     if not name or not host:
         raise Failed("SIM_MESH_PREBUILT is host/owner/name, not %s" % spec)

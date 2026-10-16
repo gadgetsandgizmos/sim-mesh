@@ -152,6 +152,15 @@ jobs:
           docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:$PWD" -w "$PWD" \
               -e HOME=/tmp -e SIM_MESH_IN_CONTAINER=1 \
               sim-mesh-dev ./sim build ${{ steps.todo.outputs.todo }}
+      - name: test what was built, before anything is published
+        if: contains(steps.todo.outputs.todo, 'ether')
+        run: |
+          # A published conductor passes its own virtual-time tests, record
+          # for record, on the outputs just built; a build that fails them is
+          # not pushed.
+          docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:$PWD" -w "$PWD" \
+              -e HOME=/tmp -e SIM_MESH_IN_CONTAINER=1 \
+              sim-mesh-dev python3 -m pytest -q ether/test_ether.py
       - name: pack and push
         if: steps.todo.outputs.todo != ''
         run: |

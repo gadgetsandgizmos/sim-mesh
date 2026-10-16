@@ -374,3 +374,29 @@ def test_the_command_line(tree, capsys):
     assert prebuilt.main(["fresh", "radio"]) == 3      # not there
     assert prebuilt.main(["pack", "radio", "--out", str(tree / "out")]) == 1
     assert "radio/build/libsimclock.so is not built" in capsys.readouterr().err
+
+
+def test_the_key_holds_a_components_cargo_settings(tree):
+    c = prebuilt.COMPONENTS["ether"]
+    write(tree, "ether/core/.cargo/config.toml", "[build]\nrustflags = []\n")
+    before = prebuilt.key(c)
+    write(tree, "ether/core/.cargo/config.toml", "[build]\nrustflags = [\"-C\", \"target-cpu=native\"]\n")
+    assert prebuilt.key(c) != before
+
+
+def test_a_stamp_is_not_fresh_after_an_edit_with_an_older_mtime(tree):
+    c = prebuilt.COMPONENTS["ether"]
+    stamp = tree / c.out / prebuilt.STAMP
+    stamp.write_text(prebuilt.key(c) + "\n")
+    assert prebuilt.fresh(c)
+    src = tree / "ether" / "core" / "src" / "lib.rs"
+    old = os.path.getmtime(src)
+    src.write_text("fn x() { /* restored from an archive */ }\n")
+    os.utime(src, (old - 3600, old - 3600))
+    assert not prebuilt.fresh(c)
+
+
+def test_off_never_fetches(tree, monkeypatch):
+    monkeypatch.setenv("SIM_MESH_PREBUILT", "off")
+    with pytest.raises(prebuilt.Unavailable, match="off"):
+        prebuilt.repository()

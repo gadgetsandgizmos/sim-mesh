@@ -132,7 +132,8 @@
 #                          where pre-built firmware is listed
 #                          (default https://sim-mesh.net/firmware/)
 #     SIM_MESH_PREBUILT    the registry repository prebuilt outputs are fetched
-#                          from (default ghcr.io/sim-mesh/sim-mesh-prebuilt)
+#                          from (default ghcr.io/sim-mesh/sim-mesh-prebuilt),
+#                          or off: never fetched, built here or said why
 #     SIM_MESH_IMAGE_REPO  the repository the image is pulled from and named in
 #                          (default ghcr.io/sim-mesh/sim-mesh)
 
