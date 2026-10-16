@@ -1269,14 +1269,25 @@ class Cache:
             if not fresh:
                 error = None
                 for each in (url if isinstance(url, (list, tuple)) else [url]):
+                    pause = BACKOFF_S
                     try:
-                        resp = await self.request("GET", each)
-                        try:
-                            if resp.status != 200:
-                                raise SourceError("%s answers %d" % (each, resp.status))
-                            body = await resp.read()
-                        finally:
-                            resp.release()
+                        for attempt in range(TRIES):
+                            resp = await self.request("GET", each)
+                            try:
+                                if resp.status != 200:
+                                    raise SourceError("%s answers %d" % (each, resp.status))
+                                body = await resp.read()
+                                break
+                            except aiohttp.ClientError as err:
+                                # the payload was cut short, or the host dropped the
+                                # connection mid-body: a few more tries, politely
+                                if attempt == TRIES - 1:
+                                    raise SourceError("%s: %s" % (
+                                        each, err or type(err).__name__)) from err
+                            finally:
+                                resp.release()
+                            await asyncio.sleep(pause)
+                            pause *= 2
                     except SourceError as err:
                         error = err
                         continue

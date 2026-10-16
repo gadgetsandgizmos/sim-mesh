@@ -299,7 +299,6 @@ sys.path.insert(0, SIM_DIR)
 
 import antennas as antennas_module  # noqa: E402 - the path is set just above
 import coverage as coverage_module  # noqa: E402
-import drivers as drivers_module    # noqa: E402
 import firmware as firmware_module  # noqa: E402
 import geodata as geodata_module    # noqa: E402
 import indexes as indexes_module    # noqa: E402
@@ -2292,8 +2291,7 @@ class Front:
                 reply = {"type": kind, "ok": True, **await self.editor(conn, kind, msg)}
             if kind not in QUIET_VERBS:
                 self.changed = True         # the registry's lists may have moved
-        except (ValueError, OSError, KeyError, TypeError, store.StoreError,
-                drivers_module.CommandError, firmware_module.FirmwareError) as err:
+        except Exception as err:
             text = str(err) if not isinstance(err, KeyError) else "missing %s" % err
             reply = {"type": kind, "ok": False, "error": text}
             log("%s: %s" % (kind, text))
@@ -2412,10 +2410,13 @@ class Front:
                         resp.headers.add(key, value)
                 if up.content_length is not None:
                     resp.content_length = up.content_length
-                await resp.prepare(request)
-                async for chunk in up.content.iter_chunked(1 << 16):
-                    await resp.write(chunk)
-                await resp.write_eof()
+                try:
+                    await resp.prepare(request)
+                    async for chunk in up.content.iter_chunked(1 << 16):
+                        await resp.write(chunk)
+                    await resp.write_eof()
+                except ConnectionResetError:
+                    log("planner %s: the browser is gone" % name)
                 return resp
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             return web.Response(status=502, text="the planner for %s: %s\n" % (name, err))
