@@ -2,17 +2,23 @@
 # sim — sim-mesh, the simulated testbed, from a shell.
 #
 #     sim [front] [FRONT-ARGS…]        start the front on port 8800 and open the page,
-#                                      first building whichever of the page, the chip
-#                                      library, the ether's conductor and the planner
-#                                      is missing or older than a file of its sources
-#     sim dev [FRONT-ARGS…]            the same, for working on the page: the page
-#                                      served live from its sources, on the same
-#                                      port, each edit in the browser at once; the
-#                                      front's own Python is read when it starts,
-#                                      so a change to it wants a restart; with the
-#                                      site checked out beside sim-mesh
+#                                      first fetching (prebuilt for the sources in
+#                                      the tree) or building whichever of the page,
+#                                      the chip library, the ether's conductor and
+#                                      the planner is missing or not of its sources
+#     sim dev [FRONT-ARGS…]            the same, for working on sim-mesh, in the
+#                                      development image: what is not prebuilt
+#                                      for its sources is built from them, and the
+#                                      page is served live from its sources, on
+#                                      the same port, each edit in the browser at
+#                                      once; the front's own Python is read when it
+#                                      starts, so a change to it wants a restart;
+#                                      with the site checked out beside sim-mesh
 #                                      (../sim-mesh.net), Jekyll serves it live
 #                                      on port 4000
+#     sim build [COMPONENT…]           build radio, ether, planner and page (or the
+#                                      ones named) from source, prebuilt or not, in
+#                                      the development image
 #     sim new [NAME] (--geodata G --nodeset N | --snapshot S)
 #             [--time max|<k>x|real] [--stagger N] [--build B] [--pairwise]
 #                                      start a simulation (and the front, when none runs);
@@ -67,10 +73,13 @@
 #     sim source outline ID [--geofabrik REGION …]
 #                                      write a source's outline: its feed's tiles, or
 #                                      Geofabrik regions' outlines together
-#     sim install [--dry-run]          on Linux, what SIM_MESH_NATIVE=1 needs, as sim-mesh's
-#                                      image holds it: the system's packages (sudo), Node
-#                                      22 where the system's is older, and Rust; then
-#                                      the build
+#     sim install [--dev] [--dry-run]  on Linux, sim-mesh on this machine instead of in
+#                                      its image: the system's packages the image holds
+#                                      (sudo), then the prebuilt outputs; with --dev,
+#                                      also what the development image holds (Node 22
+#                                      where the system's is older, a C toolchain,
+#                                      cmake, Rust), and then whatever is not prebuilt
+#                                      is built. From then on `sim` runs here
 #
 # The simulation verbs (new, stop, pause, resume, list, plan, run) take --port, the front's
 # (default 8800).
@@ -82,12 +91,24 @@
 #
 # Everything runs inside sim-mesh's own image (Dockerfile beside this script),
 # in Podman, or in Docker when Podman is not installed: the image is the system a firmware
-# may count on. It is built on first use and again whenever the Dockerfile
-# changes; the directory holding sim-mesh is mounted at its own path, so a
-# workspace beside it is where a workspace build expects it, and port 8800 is
-# published for TCP and UDP. The front's container is called sim-mesh-front,
-# and the simulation verbs run inside it. SIM_MESH_NATIVE=1 runs everything on
-# this machine instead, for working on sim-mesh itself on Linux.
+# may count on, and holds nothing else. It is pulled on first use and again
+# whenever the Dockerfile changes, tagged by the Dockerfile's sha256, and built
+# from it when it cannot be pulled; the images of earlier Dockerfiles are
+# removed. `sim dev` and `sim build` run in the development image instead
+# (Dockerfile.dev, the image with every toolchain added), built here the first
+# time, and leave a file .dev beside this script: from then on plain `sim` runs
+# in the development image too (delete .dev to go back). The directory holding
+# sim-mesh is mounted at its own path, so a workspace beside it is where a
+# workspace build expects it, and port 8800 is published for TCP and UDP. The
+# front's container is called sim-mesh-front, and the simulation verbs run
+# inside it. After `sim install` (which leaves a file .native beside this
+# script), everything runs on this machine instead.
+#
+# What sim-mesh compiles is fetched prebuilt for the sources in the tree
+# (testbed/prebuilt.py), and built from them where it is not prebuilt and the
+# toolchain is there: in the development image, or natively after
+# `sim install --dev`. A component nothing here can build is said, with what
+# runs without it.
 #
 # Ctrl-C stops everything this started in the foreground: the front is asked
 # to stop (it stops its simulations, and every child dies with it), and
@@ -96,8 +117,10 @@
 # Environment:
 #     SIM_MESH_ENGINE      podman or docker (default: podman when it is
 #                          installed, else docker)
-#     SIM_MESH_NATIVE=1    no container: run on this machine, Linux only
-#     SIM_MESH_FRONT       host:port of a front already running elsewhere (from
+#     SIM_MESH_NATIVE      1: no container, run on this machine (Linux only);
+#                          0: in the container, after `sim install` too
+#                          (default: on this machine when .native is there)
+#     SIM_MESH_FRONT      host:port of a front already running elsewhere (from
 #                          a container: host.docker.internal:8800): no
 #                          container either, the verbs go to that front, and
 #                          none is ever started here
@@ -108,6 +131,11 @@
 #     SIM_MESH_FIRMWARE_INDEX
 #                          where pre-built firmware is listed
 #                          (default https://sim-mesh.net/firmware/)
+#     SIM_MESH_PREBUILT    the registry repository prebuilt outputs are fetched
+#                          from (default ghcr.io/sim-mesh/sim-mesh-prebuilt),
+#                          or off: never fetched, built here or said why
+#     SIM_MESH_IMAGE_REPO  the repository the image is pulled from and named in
+#                          (default ghcr.io/sim-mesh/sim-mesh)
 
 set -euo pipefail
 
@@ -138,8 +166,18 @@ usage() { sed -n '2,/^$/{s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"; }
 
 # ---- the container ------------------------------------------------------------
 
+# Whether sim-mesh runs on this machine: SIM_MESH_NATIVE when set (1 or 0),
+# else whether `sim install` has been run here (.native).
+native_chosen() {
+    case "${SIM_MESH_NATIVE:-}" in
+        "") [ -e "$ROOT/.native" ] ;;
+        0) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 want_container() {
-    [ -z "${SIM_MESH_IN_CONTAINER:-}" ] && [ -z "${SIM_MESH_NATIVE:-}" ] && [ -z "${SIM_MESH_FRONT:-}" ]
+    [ -z "${SIM_MESH_IN_CONTAINER:-}" ] && [ -z "${SIM_MESH_FRONT:-}" ] && ! native_chosen
 }
 
 # The container engine, in ENGINE: SIM_MESH_ENGINE, else podman when it is
@@ -152,7 +190,7 @@ resolve_engine() {
     if [ -z "$e" ]; then
         if command -v podman >/dev/null; then e=podman
         elif command -v docker >/dev/null; then e=docker
-        else die "sim-mesh runs in a container, and neither podman nor docker is installed (SIM_MESH_NATIVE=1 runs it on this machine, Linux only)"
+        else die "sim-mesh runs in a container, and neither podman nor docker is installed (on Linux, sim install runs it on this machine instead)"
         fi
     fi
     command -v "$e" >/dev/null || die "SIM_MESH_ENGINE is $e, which is not installed"
@@ -200,20 +238,93 @@ open_when_up() {
     ) &
 }
 
+# sha256 FILE…: the first 12 hex digits of the sha256 of the files' bytes,
+# one after the other (testbed/prebuilt.py's image-key makes the same).
+sha256() {
+    local sum
+    if command -v sha256sum >/dev/null; then sum=(sha256sum)
+    else sum=(shasum -a 256)        # a Mac's
+    fi
+    cat "$@" | "${sum[@]}" | cut -c1-12
+}
+
+IMAGE_REPO=${SIM_MESH_IMAGE_REPO:-ghcr.io/sim-mesh/sim-mesh}
+IMAGE_SIZE="about 50 MB"            # compressed, as CI publishes it
+RUNTIME_IMAGE=
+DEV_IMAGE=
+
+# The image, in RUNTIME_IMAGE: pulled when it is not here, built from the
+# Dockerfile when it cannot be pulled (offline, or a Dockerfile not
+# published), under the same name either way.
+ensure_runtime_image() {
+    [ -z "$RUNTIME_IMAGE" ] || return 0
+    local e=$ENGINE image
+    image="$IMAGE_REPO:$(sha256 "$ROOT/Dockerfile")"
+    if ! "$e" image inspect "$image" >/dev/null 2>&1; then
+        say "pulling the sim-mesh image ($image, $IMAGE_SIZE)"
+        if ! "$e" pull "$image"; then
+            say "it cannot be pulled: building it from the Dockerfile with ${e}…"
+            "$e" build -t "$image" -f "$ROOT/Dockerfile" "$ROOT" \
+                || die "the sim-mesh image did not build"
+        fi
+    fi
+    RUNTIME_IMAGE=$image
+}
+
+# The development image, in DEV_IMAGE: built here from the image, never
+# pulled.
+ensure_dev_image() {
+    [ -z "$DEV_IMAGE" ] || return 0
+    ensure_runtime_image
+    local e=$ENGINE image
+    image="sim-mesh-dev:$(sha256 "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev")"
+    if ! "$e" image inspect "$image" >/dev/null 2>&1; then
+        say "building the development image (Node, a C toolchain, cmake, Rust, Ruby: about 1.5 GB, once) with ${e}…"
+        "$e" build --build-arg "BASE=$RUNTIME_IMAGE" -t "$image" -f "$ROOT/Dockerfile.dev" "$ROOT" \
+            || die "the development image did not build"
+    fi
+    DEV_IMAGE=$image
+}
+
+# Every sim-mesh image but the ones in use: an earlier Dockerfile's, an
+# earlier development image, and those named as sim-mesh named them before
+# (sim-mesh:<cksum>, sim-mesh:win-<sha256>). Only these, by name: never a
+# prune, which would take the user's other images and build cache with them.
+# An image a running container uses refuses, and stays.
+remove_old_images() {
+    local e=$ENGINE ref removed=0 dev_tag
+    dev_tag=$(sha256 "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev")
+    while IFS= read -r ref; do
+        case "$ref" in
+            "$RUNTIME_IMAGE"|"sim-mesh-dev:$dev_tag"|"localhost/sim-mesh-dev:$dev_tag") continue ;;
+            "$IMAGE_REPO:"*|sim-mesh-dev:*|localhost/sim-mesh-dev:*|sim-mesh:*|localhost/sim-mesh:*) ;;
+            *) continue ;;
+        esac
+        if "$e" rmi "$ref" >/dev/null 2>&1; then removed=$((removed + 1)); fi
+    done < <("$e" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+    [ "$removed" = 0 ] || say "removed $removed old sim-mesh image$([ "$removed" = 1 ] || echo s)"
+}
+
 # in_container MODE ARGS…: `./sim ARGS…` in sim-mesh's image. MODE is tools (a
-# verb of its own, nothing published), front (the front, in the foreground),
-# daemon (the front, in the background) or dev (`sim dev`, in the foreground).
+# verb of its own, nothing published), build (`sim build`, the same in the
+# development image), front (the front, in the foreground), daemon (the
+# front, in the background) or dev (`sim dev`, in the foreground, in the
+# development image). `sim dev` and `sim build` leave .dev, which puts every
+# later MODE in the development image too.
 in_container() {
     local mode=$1; shift
-    local e tag image
+    local e image
     resolve_engine
     e=$ENGINE
-    tag=$(cksum < "$ROOT/Dockerfile" | cut -d' ' -f1)
-    image="sim-mesh:$tag"
-    if ! "$e" image inspect "$image" >/dev/null 2>&1; then
-        say "building the sim-mesh image ($image) with ${e}…"
-        "$e" build -t "$image" "$ROOT"
+    case "$mode" in dev|build) : > "$ROOT/.dev" ;; esac
+    if [ -e "$ROOT/.dev" ]; then
+        ensure_dev_image
+        image=$DEV_IMAGE
+    else
+        ensure_runtime_image
+        image=$RUNTIME_IMAGE
     fi
+    remove_old_images
     local outer
     outer=$(cd "$ROOT/.." && pwd)
     # A station binds its web UI's port 80 and 443 as the caller's user: the
@@ -236,9 +347,11 @@ in_container() {
     [ -z "${SIM_MESH_FIRMWARE_INDEX:-}" ] \
         || args+=(-e "SIM_MESH_FIRMWARE_INDEX=$SIM_MESH_FIRMWARE_INDEX")
     [ -z "${SIM_MESH_INDEX:-}" ] || args+=(-e "SIM_MESH_INDEX=$SIM_MESH_INDEX")
+    [ -z "${SIM_MESH_PREBUILT:-}" ] || args+=(-e "SIM_MESH_PREBUILT=$SIM_MESH_PREBUILT")
+    [ -z "${SIM_MESH_IMAGE_REPO:-}" ] || args+=(-e "SIM_MESH_IMAGE_REPO=$SIM_MESH_IMAGE_REPO")
     # publish's upload to a GitHub release; the value stays out of the command line.
     [ -z "${GH_TOKEN:-}" ] || args+=(-e GH_TOKEN)
-    if [ "$mode" = tools ]; then
+    if [ "$mode" = tools ] || [ "$mode" = build ]; then
         args+=(-i)
         [ -t 0 ] && [ -t 1 ] && args+=(-t)
     else
@@ -297,14 +410,14 @@ ensure_front() {
         say "starting the front in the background ($FRONT_CONTAINER)"
         in_container daemon front >/dev/null
     else
-        build_stale
+        ensure "${COMPONENTS[@]}"
         local py log="$ROOT/testbed/runs/front.log"
         py=$(pick_python)
         mkdir -p "$ROOT/testbed/runs"
         say "starting the front in the background (log: $log)"
         setsid -f "$py" "$ROOT/testbed/front.py" --bind "0.0.0.0:$PORT" >>"$log" 2>&1 </dev/null
     fi
-    say "waiting for the front (a first start builds the page, the radio, the ether's conductor and the planner)"
+    say "waiting for the front (a first start fetches or builds the page, the radio, the ether's conductor and the planner)"
     local waited=0
     until front_up; do
         sleep 1
@@ -340,52 +453,93 @@ pick_python() {
     die "no python3 with aiohttp and pyyaml (set SIM_MESH_PYTHON, or install python3-aiohttp python3-yaml)"
 }
 
-# stale DIR OUT… [-- SKIP…]: true when an OUT is missing or a file under DIR,
-# outside the SKIP directories (relative to DIR), hidden directories and
-# __pycache__, is newer than it.
-stale() {
-    local dir=$1; shift
-    local outs=() prune=(-type d \( -name '.?*' -o -name __pycache__ \) -prune -o)
-    while [ $# -gt 0 ] && [ "$1" != -- ]; do outs+=("$1"); shift; done
-    [ $# -eq 0 ] || shift
-    local s
-    for s in "$@"; do prune+=(-path "$dir/$s" -prune -o); done
-    local out
-    for out in "${outs[@]}"; do
-        [ -e "$out" ] || return 0
-        [ -z "$(find "$dir" "${prune[@]}" -type f -newer "$out" -print -quit)" ] || return 0
+# The components sim-mesh compiles, in the order they are built: the
+# planner before the page, since its wasm lands in the page's vendor/, which
+# the page builds from. testbed/prebuilt.py holds what each is built from and
+# into.
+COMPONENTS=(radio ether planner page)
+
+prebuilt() {
+    "$(pick_python)" "$ROOT/testbed/prebuilt.py" "$@"
+}
+
+# Whether a component's outputs are there and of the sources in the tree.
+fresh() {
+    prebuilt fresh "$1"
+}
+
+# toolchain_missing COMPONENT: what builds it, when that is not on this
+# machine.
+toolchain_missing() {
+    case "$1" in
+        radio) command -v cmake >/dev/null || echo cmake ;;
+        ether|planner) command -v cargo >/dev/null || echo cargo ;;
+        page) command -v npm >/dev/null || echo npm ;;
+    esac
+}
+
+# Where building from source is to be had, when it is not here.
+from_source() {
+    if [ -n "${SIM_MESH_IN_CONTAINER:-}" ]; then echo "\`sim dev\` builds it from source"
+    else echo "\`sim install --dev\` puts what builds it on this machine"
+    fi
+}
+
+# not_built COMPONENT WHY: said, with what runs instead: the outputs there
+# of other sources, or without it.
+not_built() {
+    local state=0
+    fresh "$1" || state=$?
+    if [ "$state" = 1 ]; then
+        case "$1" in
+            radio) say "the chip library and the time shim $2: the ones there, of other sources, run" ;;
+            ether) say "the ether's conductor $2: the one there, of other sources, runs" ;;
+            planner) say "the planner $2: the one there, of other sources, runs" ;;
+            page) say "the page $2: the one there, of other sources, is served" ;;
+        esac
+        return 0
+    fi
+    case "$1" in
+        radio) say "the chip library and the time shim $2: a station with a radio cannot start" ;;
+        ether) say "the ether's conductor $2: real time runs, virtual time is refused" ;;
+        planner) say "the planner $2: synthetic ground works, and a pack is refused saying so" ;;
+        page) say "the page $2: the front will say so when it is opened" ;;
+    esac
+}
+
+# ensure COMPONENT…: each one fresh, fetched prebuilt, or built here when its
+# toolchain is; otherwise said, with what runs without it. One fetch for
+# them all, so a registry out of reach is waited for once.
+ensure() {
+    local c stale=() missing
+    for c in "$@"; do fresh "$c" || stale+=("$c"); done
+    [ ${#stale[@]} -gt 0 ] || return 0
+    prebuilt fetch "${stale[@]}" || true
+    for c in "${stale[@]}"; do
+        fresh "$c" && continue
+        missing=$(toolchain_missing "$c")
+        if [ -n "$missing" ]; then
+            not_built "$c" "is not built for these sources, and there is no $missing here ($(from_source))"
+        else
+            "build_$c" || not_built "$c" "did not build"
+        fi
     done
-    return 1
 }
 
-page_stale() {
-    stale "$ROOT/testbed/ui" "$ROOT/testbed/ui/dist/spa/index.html" -- node_modules dist
-}
-
-radio_stale() {
-    stale "$ROOT/radio" "$ROOT/radio/build/libsimclock.so" \
-          "$ROOT/radio/build/libsimradio-sx1262.so" -- build tests portduino
-}
-
-planner_stale() {
-    stale "$PLANNER" "$PLANNER/target/release/planner-web" "$PLANNER/target/release/planner-job" -- target
-}
-
-ether_stale() {
-    stale "$ROOT/ether/core" "$ROOT/ether/build/ether_core.abi3.so" -- target
-}
+# The build_ functions build a component from source, its stamp of prebuilt
+# outputs removed first; each returns non-zero when the build fails.
 
 build_page() {
     local ui="$ROOT/testbed/ui"
-    command -v npm >/dev/null || die "the page needs node and npm"
+    rm -f "$ui/dist/.prebuilt"
     say "the page: npm install"
-    (cd "$ui" && npm install --no-fund --no-audit)
+    (cd "$ui" && npm install --no-fund --no-audit) || return 1
     say "the page: quasar build"
     (cd "$ui" && npx quasar build)
 }
 
 build_radio() {
-    command -v cmake >/dev/null || die "the chip library needs cmake and a C compiler"
+    rm -f "$ROOT/radio/build/.prebuilt"
     say "the chip library and the time shim: cmake"
     # A cache configured for the tree at another path (moved, or mounted
     # elsewhere in the image) is configured again from scratch.
@@ -393,10 +547,11 @@ build_radio() {
     if [ -f "$cache" ] && ! grep -qxF "CMAKE_HOME_DIRECTORY:INTERNAL=$ROOT/radio" "$cache"; then
         fresh=(--fresh)
     fi
-    cmake ${fresh[@]+"${fresh[@]}"} -S "$ROOT/radio" -B "$ROOT/radio/build"
-    cmake --build "$ROOT/radio/build" -j "$(nproc 2>/dev/null || echo 2)"
+    cmake ${fresh[@]+"${fresh[@]}"} -S "$ROOT/radio" -B "$ROOT/radio/build" || return 1
+    cmake --build "$ROOT/radio/build" -j "$(nproc 2>/dev/null || echo 2)" || return 1
     # Up to date now, whichever sources the build found nothing to redo for.
-    touch "$ROOT/radio/build/libsimclock.so" "$ROOT/radio/build/libsimradio-sx1262.so"
+    touch "$ROOT/radio/build/libsimclock.so" "$ROOT/radio/build/libsimradio-sx1262.so" \
+          "$ROOT/radio/build/libsimradio-lr2021.so"
 }
 
 # cargo build with the crates already on this machine, and only when one is
@@ -411,10 +566,10 @@ cargo_build() {
 # ether loads from ether/build/: a virtual-time run is refused without it, and
 # a real-time one needs none.
 build_ether() {
-    command -v cargo >/dev/null || die "the ether's conductor needs cargo"
+    rm -f "$ROOT/ether/build/.prebuilt"
     say "the ether's conductor: ether_core (cargo build --release)"
     (cd "$ROOT/ether/core" && PYO3_PYTHON="$(pick_python)" \
-        cargo_build --release --target-dir "$ROOT/ether/build/target")
+        cargo_build --release --target-dir "$ROOT/ether/build/target") || return 1
     cp "$ROOT/ether/build/target/release/libether_core.so" "$ROOT/ether/build/ether_core.abi3.so"
 }
 
@@ -422,7 +577,7 @@ build_ether() {
 # wasm goes first when wasm-pack is there; without it, planner-web embeds the
 # output already in the tree.
 build_planner() {
-    command -v cargo >/dev/null || die "the planner needs cargo"
+    rm -f "$PLANNER/target/release/.prebuilt"
     local static="$PLANNER/crates/planner-web/static"
     if command -v wasm-pack >/dev/null; then
         say "the planner: planner-wasm (wasm-pack)"
@@ -431,7 +586,8 @@ build_planner() {
         if ! (cd "$PLANNER" && wasm-pack build crates/planner-wasm --release --target web \
                   --out-dir "$out" --out-name planner_wasm); then
             rm -rf -- "$out"
-            die "planner-wasm did not build"
+            say "planner-wasm did not build"
+            return 1
         fi
         cp "$out/planner_wasm.js" "$out/planner_wasm_bg.wasm" \
            "$out/planner_wasm.d.ts" "$out/planner_wasm_bg.wasm.d.ts" "$static/"
@@ -444,7 +600,7 @@ build_planner() {
         say "the planner: no wasm-pack, so planner-web embeds the planner-wasm output already in $static"
     fi
     say "the planner: planner-web and planner-job (cargo build --release)"
-    (cd "$PLANNER" && cargo_build --release -p planner-web -p planner-job)
+    (cd "$PLANNER" && cargo_build --release -p planner-web -p planner-job) || return 1
     touch "$PLANNER/target/release/planner-web" "$PLANNER/target/release/planner-job"
 }
 
@@ -460,30 +616,43 @@ sweep_group() {
     kill -TERM -- "-$$" 2>/dev/null || true
 }
 
-# Whichever of the radio, the ether's conductor, the planner and the page is
-# missing or older than its sources, built.
-build_stale() {
-    ! radio_stale || build_radio
-    stale_ether
-    # The planner first: its wasm lands in the page's vendor/, which the page
-    # then builds from.
-    ! planner_stale || (build_planner) \
-        || say "the planner did not build; synthetic ground works, and a pack is refused saying so"
-    ! page_stale || build_page \
-        || say "the page did not build; the front will say so when it is opened"
+# dev_tools_missing COMPONENT…: natively, what building them from source
+# needs and this machine lacks, by name (Node, cmake, cargo).
+dev_tools_missing() {
+    local c tool listed=
+    for c in "$@"; do
+        tool=
+        case "$c" in
+            radio) command -v cmake >/dev/null || tool=cmake ;;
+            ether|planner) command -v cargo >/dev/null || tool=cargo ;;
+            page) { node_fits && command -v npm >/dev/null; } || tool="Node $NODE_MAJOR" ;;
+        esac
+        [ -z "$tool" ] || [[ ", $listed, " == *", $tool, "* ]] || listed="${listed:+$listed, }$tool"
+    done
+    printf '%s' "$listed"
 }
 
-# The ether's conductor built when stale and cargo is there; without it the
-# Python one runs.
-stale_ether() {
-    ! ether_stale || { command -v cargo >/dev/null && build_ether; } \
-        || say "the ether's conductor is not built: real time runs, virtual time is refused"
+# cmd_build [COMPONENT…]: build them (all four when none is named) from
+# source, prebuilt or not, in their order.
+cmd_build() {
+    local c wanted=() missing
+    for c in "$@"; do
+        [[ " ${COMPONENTS[*]} " == *" $c "* ]] || die "build: no component '$c' (${COMPONENTS[*]})"
+    done
+    for c in "${COMPONENTS[@]}"; do
+        [ $# -gt 0 ] && [[ " $* " != *" $c "* ]] || wanted+=("$c")
+    done
+    missing=$(dev_tools_missing "${wanted[@]}")
+    [ -z "$missing" ] || die "\`sim build\` needs $missing here: run \`sim install --dev\` first"
+    for c in "${wanted[@]}"; do
+        "build_$c" || die "$c did not build"
+    done
 }
 
 cmd_front() {
     local py
     py=$(pick_python)
-    build_stale
+    ensure "${COMPONENTS[@]}"
     say "the page: $URL"
     [ -n "${SIM_MESH_IN_CONTAINER:-}" ] || open_when_up "$URL"
     "$py" "$ROOT/testbed/front.py" --bind "0.0.0.0:$PORT" "$@" &
@@ -502,13 +671,15 @@ cmd_front() {
 # when checked out beside sim-mesh, from Jekyll on SITE_PORT; Ctrl-C stops
 # them all.
 cmd_dev() {
-    local py ui="$ROOT/testbed/ui"
+    local py ui="$ROOT/testbed/ui" missing
+    # Natively, what builds sim-mesh is `sim install --dev`'s to put here
+    # (with sudo), never this verb's.
+    if [ -z "${SIM_MESH_IN_CONTAINER:-}" ]; then
+        missing=$(dev_tools_missing "${COMPONENTS[@]}")
+        [ -z "$missing" ] || die "\`sim dev\` needs $missing here: run \`sim install --dev\` first"
+    fi
     py=$(pick_python)
-    ! radio_stale || build_radio
-    stale_ether
-    ! planner_stale || (build_planner) \
-        || say "the planner did not build; synthetic ground works, and a pack is refused saying so"
-    command -v npm >/dev/null || die "the page needs node and npm"
+    ensure radio ether planner
     [ -d "$ui/node_modules" ] || (cd "$ui" && npm install --no-fund --no-audit)
     (cd "$ui" && exec npx quasar dev --hostname 127.0.0.1 --port "$DEV_PORT") &
     local page=$!
@@ -613,25 +784,28 @@ run_script() {
 }
 
 # ---- installing on Linux --------------------------------------------------------
-# What SIM_MESH_NATIVE=1 needs on a fresh Linux, as sim-mesh's image holds it
-# (Dockerfile): the system's packages through its package manager, with sudo;
-# where the system's Node is older than the page's Vite and Quasar take,
-# NodeSource's on Debian and Ubuntu (which ship 18) and Fedora's own later one
-# on Fedora (which defaults to 22.21); Rust through rustup, in the user's home;
-# and a Python environment beside this script, .venv, over the system's own
-# packages, where a Node the system names by its major gets its plain name.
-# Then the build. A step whose result is already there is left out, so running
-# it again costs nothing. apt (Debian, Ubuntu) and dnf (Fedora); elsewhere it
-# says what to install. The lists are the Dockerfile's (testbed/test_install.py
-# keeps them so).
+# sim-mesh on a fresh Linux instead of in its image. `sim install` puts here
+# what the image holds (Dockerfile), the system's packages through its
+# package manager, with sudo, and fetches the prebuilt outputs. `--dev` adds
+# what the development image holds (Dockerfile.dev): its packages; where the
+# system's Node is older than the page's Vite and Quasar take, NodeSource's on
+# Debian and Ubuntu (which ship 18) and Fedora's own later one on Fedora
+# (which defaults to 22.21); Rust through rustup, in the user's home; and a
+# Python environment beside this script, .venv, over the system's own
+# packages, where a Node the system names by its major gets its plain name;
+# then whatever is not prebuilt is built. A step whose result is already there
+# is left out, so running it again costs nothing. apt (Debian, Ubuntu) and dnf
+# (Fedora); elsewhere it says what to install. The lists are the Dockerfiles'
+# (testbed/test_install.py keeps them so). Either form ends by leaving
+# .native beside this script: `sim` runs on this machine from then on.
 
-APT_PACKAGES=(ca-certificates curl gnupg git python3 python3-aiohttp python3-yaml
-              python3-pytest python3-venv build-essential cmake pkg-config
-              libstdc++6 procps ruby-dev ruby-bundler zlib1g-dev)
-DNF_PACKAGES=(ca-certificates curl git python3 python3-aiohttp python3-pyyaml python3-pytest
-              gcc gcc-c++ make cmake pkgconf-pkg-config libstdc++ procps-ng
-              ruby-devel rubygem-bundler zlib-devel)
-NODE_MAJOR=22                       # NodeSource's, as the image's
+APT_PACKAGES=(ca-certificates python3 python3-aiohttp python3-yaml libstdc++6 procps)
+APT_DEV_PACKAGES=(curl gnupg git python3-pytest python3-venv build-essential cmake
+                  pkg-config ruby-dev ruby-bundler zlib1g-dev)
+DNF_PACKAGES=(ca-certificates python3 python3-aiohttp python3-pyyaml libstdc++ procps-ng)
+DNF_DEV_PACKAGES=(curl git python3-pytest gcc gcc-c++ make cmake pkgconf-pkg-config
+                  ruby-devel rubygem-bundler zlib-devel)
+NODE_MAJOR=22                       # NodeSource's, as the development image's
 NODE_FEDORA=24                      # Fedora's own, beside its default
 
 # Whether the node on the path is one the page builds with: 22.22 or later.
@@ -645,27 +819,37 @@ node_fits() {
 }
 
 cmd_install() {
-    local dry=0
-    case "${1:-}" in
-        "") ;;
-        --dry-run) dry=1 ;;
-        *) die "install: the one option is --dry-run" ;;
-    esac
+    local dry=0 dev=0 a
+    for a in "$@"; do
+        case "$a" in
+            --dry-run) dry=1 ;;
+            --dev) dev=1 ;;
+            *) die "install: the options are --dev and --dry-run" ;;
+        esac
+    done
     [ "$(uname -s)" = Linux ] || die "install: Linux only; anywhere else sim-mesh runs in its image"
     local sudo=()
     [ "$(id -u)" = 0 ] || sudo=(sudo)
     step() { say "$*"; [ "$dry" = 1 ] || "$@"; }
-    local manager
+    local manager apt=("${APT_PACKAGES[@]}") dnf=("${DNF_PACKAGES[@]}")
+    [ "$dev" = 0 ] || { apt+=("${APT_DEV_PACKAGES[@]}"); dnf+=("${DNF_DEV_PACKAGES[@]}"); }
     if command -v apt-get >/dev/null; then manager=apt
     elif command -v dnf >/dev/null; then manager=dnf
-    else die "install: neither apt-get nor dnf here; install by hand what the Dockerfile holds"
+    else die "install: neither apt-get nor dnf here; install by hand what the Dockerfiles hold"
     fi
     if [ "$manager" = apt ]; then
         step "${sudo[@]}" apt-get update
         step "${sudo[@]}" env DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+            apt-get install -y --no-install-recommends "${apt[@]}"
     else
-        step "${sudo[@]}" dnf install -y "${DNF_PACKAGES[@]}"
+        step "${sudo[@]}" dnf install -y "${dnf[@]}"
+    fi
+    if [ "$dev" = 0 ]; then
+        [ "$dry" = 1 ] && return 0
+        ensure "${COMPONENTS[@]}"
+        : > "$ROOT/.native"
+        say "installed: start it with $0"
+        return 0
     fi
     # The environment first: it is also where a Node the system names by its
     # major is given its plain name.
@@ -708,8 +892,9 @@ cmd_install() {
     fi
     if command -v rustup >/dev/null; then step rustup target add wasm32-unknown-unknown; fi
     [ "$dry" = 1 ] && return 0
-    build_stale
-    say "installed: start it with SIM_MESH_NATIVE=1 $0"
+    ensure "${COMPONENTS[@]}"
+    : > "$ROOT/.native"
+    say "installed: start it with $0"
 }
 
 # ---- dispatch -------------------------------------------------------------------
@@ -719,7 +904,7 @@ verb=${1:-}
 case "$verb" in
     -h|--help|help) usage; exit 0 ;;
     install) shift; cmd_install "$@"; exit $? ;;
-    ""|front|dev|-*|firmware|index|geodata|nodeset|source|new|stop|pause|resume|list|plan|run) ;;
+    ""|front|dev|build|-*|firmware|index|geodata|nodeset|source|new|stop|pause|resume|list|plan|run) ;;
     *) die "no verb '$verb' (sim help lists them)" ;;
 esac
 
@@ -749,6 +934,7 @@ if want_container; then
         new|stop|pause|resume|list|plan) in_front "$@" ;;
         front) shift; in_container front "$@" ;;
         dev) in_container dev "$@" ;;
+        build) in_container build "$@" ;;
         *) in_container front "$@" ;;
     esac
     exit $?
@@ -765,5 +951,6 @@ case "$verb" in
     run) shift; cmd_run "$@" ;;
     front) shift; cmd_front "$@" ;;
     dev) shift; cmd_dev "$@" ;;
+    build) shift; cmd_build "$@" ;;
     *) cmd_front "$@" ;;
 esac

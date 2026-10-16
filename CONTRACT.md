@@ -600,8 +600,9 @@ void    simradio_on_advance(void (*moved)(void));
 
 ## 10. Building against it
 
-Start sim-mesh once first (`sim`, which builds its radio and leaves
-`radio/build/libsimradio-sx1262.so`), then build the station for Linux:
+Start sim-mesh once first (`sim`, which fetches or builds its radio and
+leaves `radio/build/libsimradio-sx1262.so`), then build the station for
+Linux:
 
 ```sh
 # C or C++

@@ -698,7 +698,7 @@ def test_only_a_station_that_printed_is_read_through_the_pty_thread(marks):
     if marks == "core":
         module = simd.ether_module.core_module()
         if module is None:
-            pytest.skip("no ether core built (sim builds it when it starts)")
+            pytest.skip("no ether core built (sim fetches or builds it when it starts)")
 
     async def go():
         main = asyncio.get_running_loop()

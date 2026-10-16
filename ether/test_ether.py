@@ -277,7 +277,7 @@ def pairwise(tmp_path):
         bed.close()
 
 
-# A virtual-time run's conductor is ether_core (`sim-mesh build ether`), and
+# A virtual-time run's conductor is ether_core (`sim build ether`), and
 # every virtual-time test needs it: without it they fail saying so, rather than
 # skip and look like a suite that passed.
 CORE_BUILT = os.path.exists(ether_module.CORE_PATH)
@@ -285,7 +285,7 @@ CORE_BUILT = os.path.exists(ether_module.CORE_PATH)
 
 def need_core():
     if not CORE_BUILT:
-        pytest.fail("no ether core built (sim-mesh build ether)")
+        pytest.fail("no ether core built (sim build ether)")
 
 
 @pytest.fixture

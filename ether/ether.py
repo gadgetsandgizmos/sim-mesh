@@ -926,7 +926,7 @@ class Ether(asyncio.DatagramProtocol):
         self.mode, self.rate = parse_time_mode(time_mode)
         if self.mode == "virtual" and type(self) is Ether:
             raise ValueError("a virtual-time run is conducted by ether_core: open_ether() "
-                             "makes its ether (sim-mesh build ether)")
+                             "makes its ether (sim build ether)")
         self.clock = VirtualClock() if self.mode == "virtual" else RealClock(self.loop)
         # The wall-clock microseconds T = 0 stands for, so every station's
         # time() agrees with every other's. A virtual run may be given one,
@@ -2342,7 +2342,7 @@ class Ether(asyncio.DatagramProtocol):
 #
 # In a virtual-time run most of the ether's work is the barrier: an idle in, T
 # moved, the stations due sent a `run`. ether_core, built from ether/core
-# (built by `sim` when it starts), does that in Rust on the ether's socket, in the
+# (fetched or built by `sim` when it starts), does that in Rust on the ether's socket, in the
 # event loop's thread; CoreEther is Ether with that conductor and everything
 # else as Ether has it. It is the only conductor: the one Ether had in Python,
 # which the core was proved against record for record, is gone, and a
@@ -2359,7 +2359,7 @@ def core_module():
     if _core_module is None:
         if not os.path.exists(CORE_PATH):
             raise RuntimeError("a virtual-time run is conducted by ether_core, and there is "
-                               "no %s (sim builds it when it starts)" % CORE_PATH)
+                               "no %s (sim fetches or builds it when it starts)" % CORE_PATH)
         import importlib.util
         spec = importlib.util.spec_from_file_location("ether_core", CORE_PATH)
         module = importlib.util.module_from_spec(spec)

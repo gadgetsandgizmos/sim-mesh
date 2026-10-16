@@ -317,8 +317,8 @@ SIGNAL_PATH = simd_module.SIGNAL_PATH
 LOSSES_PY = os.path.join(SIM_DIR, "losses.py")
 PLANNER_WEB = os.path.join("target", "release", "planner-web")
 PLANNER_JOB = os.path.join("target", "release", "planner-job")
-NO_PLANNER = ("geodata %s is a pack, and planner-web is not built: `sim` builds it as it "
-              "starts, and said why it could not")
+NO_PLANNER = ("geodata %s is a pack, and planner-web is not built: `sim` fetches or builds it "
+              "as it starts, and said why it could not; `sim dev` builds it from source")
 OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 OSM_TILES_DIR = os.path.join(SIM_DIR, "osmtiles")
 OSM_TILE_MAX_AGE_S = 7 * 86400      # the tile usage policy's floor for keeping one
@@ -1864,8 +1864,9 @@ class Front:
         path = self.new_path(nodeset_module.nodeset_path(name), "nodeset", name)
         gd = geodata_module.load(msg.get("geodata") or "")
         if planner_job() is None:
-            raise store.StoreError("planner-job is not built: `sim` builds it as it starts, "
-                                       "and said why it could not")
+            raise store.StoreError("planner-job is not built: `sim` fetches or builds it as it "
+                                   "starts, and said why it could not; `sim dev` builds it from "
+                                   "source")
         if source == "meshcore":
             fetched = await self.cache.meta_file(MESHCORE_META, MESHCORE_NODES)
         elif source == "potatomesh":
@@ -2734,8 +2735,9 @@ class Front:
         try:
             spec = self.build_spec(await request.json())
             if planner_job() is None:
-                raise store.StoreError("planner-job is not built: `sim` builds it as it starts, "
-                                           "and said why it could not")
+                raise store.StoreError("planner-job is not built: `sim` fetches or builds it as "
+                                       "it starts, and said why it could not; `sim dev` builds "
+                                       "it from source")
             if self.build is not None and self.build.running:
                 raise store.StoreError("%s is being built: one build at a time" % self.build.name)
             packbuild_module.refuse(spec)
@@ -2880,8 +2882,9 @@ class Front:
             "http://<station>.<simulation>.sim.localhost:%s/"
             % (self.args.public_port, self.args.public_port))
         if planner_web() is None:
-            log("planner-web is not built in %s (`sim` builds it as it starts): packs are refused, "
-                "synthetic ground works" % geodata_module.planner_repo())
+            log("planner-web is not built in %s (`sim` fetches or builds it as it starts, "
+                "`sim dev` from source): packs are refused, synthetic ground works"
+                % geodata_module.planner_repo())
 
     # ---- the run ---------------------------------------------------------
 
