@@ -902,6 +902,7 @@ cmd_install() {
 
 # test: run tests.yaml tests in sim container, in order to use current Dockerfile, same mounts and options
 cmd_test() {
+    ensure radio ether planner
     python3 - "$ROOT" "$@" <<'PY'
 import subprocess, sys, yaml
 root, ids = sys.argv[1], sys.argv[2:]
