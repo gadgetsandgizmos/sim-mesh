@@ -5,7 +5,7 @@ tests:
     tier: smoke
     run: cd testbed && python3 -m pytest -q
     tools: [docker]
-    paths: [testbed/**]
+    paths: [testbed/**, sim, Dockerfile, Dockerfile.dev, tests.yaml]
 
   - id: ether
     type: host
@@ -13,7 +13,7 @@ tests:
     tier: smoke
     run: cd ether && python3 -m pytest -q
     tools: [docker]
-    paths: [ether/**]
+    paths: [ether/**, sim, Dockerfile, Dockerfile.dev, tests.yaml]
 
   - id: radio
     type: host
@@ -21,7 +21,7 @@ tests:
     tier: smoke
     run: cd radio && python3 -m pytest -q tests
     tools: [docker]
-    paths: [radio/**]
+    paths: [radio/**, sim, Dockerfile, Dockerfile.dev, tests.yaml]
 
   - id: planner
     type: host
@@ -29,7 +29,7 @@ tests:
     tier: smoke
     run: cd planner && cargo test
     tools: [docker]
-    paths: [planner/**]
+    paths: [planner/**, sim, Dockerfile, Dockerfile.dev, tests.yaml]
 
   - id: planner-slow
     type: host
@@ -37,4 +37,4 @@ tests:
     tier: nightly
     run: cd planner && cargo test -- --ignored
     tools: [docker]
-    paths: [planner/**]
+    paths: [planner/**, sim, Dockerfile, Dockerfile.dev, tests.yaml]
