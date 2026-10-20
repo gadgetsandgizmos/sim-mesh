@@ -309,7 +309,8 @@ remove_old_images() {
 
 # in_container MODE ARGS…: `./sim ARGS…` in sim-mesh's image. MODE is tools (a
 # verb of its own, nothing published), build (`sim build`, the same in the
-# development image), front (the front, in the foreground), daemon (the
+# development image), test (a test run, in the development image without
+# leaving .dev), front (the front, in the foreground), daemon (the
 # front, in the background) or dev (`sim dev`, in the foreground, in the
 # development image). `sim dev` and `sim build` leave .dev, which puts every
 # later MODE in the development image too.
@@ -319,7 +320,7 @@ in_container() {
     resolve_engine
     e=$ENGINE
     case "$mode" in dev|build) : > "$ROOT/.dev" ;; esac
-    if [ -e "$ROOT/.dev" ]; then
+    if [ -e "$ROOT/.dev" ] || [ "$mode" = test ]; then
         ensure_dev_image
         image=$DEV_IMAGE
     else
@@ -353,7 +354,7 @@ in_container() {
     [ -z "${SIM_MESH_IMAGE_REPO:-}" ] || args+=(-e "SIM_MESH_IMAGE_REPO=$SIM_MESH_IMAGE_REPO")
     # publish's upload to a GitHub release; the value stays out of the command line.
     [ -z "${GH_TOKEN:-}" ] || args+=(-e GH_TOKEN)
-    if [ "$mode" = tools ] || [ "$mode" = build ]; then
+    if [ "$mode" = tools ] || [ "$mode" = build ] || [ "$mode" = test ]; then
         args+=(-i)
         [ -t 0 ] && [ -t 1 ] && args+=(-t)
     else
@@ -954,7 +955,8 @@ fi
 
 if want_container; then
     case "$verb" in
-        firmware|index|geodata|nodeset|source|test) in_container tools "$@" ;;
+        firmware|index|geodata|nodeset|source) in_container tools "$@" ;;
+        test) in_container test "$@" ;;
         new|stop|pause|resume|list|plan) in_front "$@" ;;
         front) shift; in_container front "$@" ;;
         dev) in_container dev "$@" ;;
