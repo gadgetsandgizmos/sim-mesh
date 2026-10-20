@@ -1,0 +1,40 @@
+tests:
+  - id: testbed
+    type: host
+    env: sim-mesh
+    tier: smoke
+    run: cd testbed && python3 -m pytest -q
+    tools: [docker]
+    paths: [testbed/**]
+
+  - id: ether
+    type: host
+    env: sim-mesh
+    tier: smoke
+    run: cd ether && python3 -m pytest -q
+    tools: [docker]
+    paths: [ether/**]
+
+  - id: radio
+    type: host
+    env: sim-mesh
+    tier: smoke
+    run: cd radio && python3 -m pytest -q tests
+    tools: [docker]
+    paths: [radio/**]
+
+  - id: planner
+    type: host
+    env: sim-mesh
+    tier: smoke
+    run: cd planner && cargo test
+    tools: [docker]
+    paths: [planner/**]
+
+  - id: planner-slow
+    type: host
+    env: sim-mesh
+    tier: nightly
+    run: cd planner && cargo test -- --ignored
+    tools: [docker]
+    paths: [planner/**]
