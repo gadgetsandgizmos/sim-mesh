@@ -29,6 +29,8 @@ events.
 """
 from sim_mesh import *
 from sim_mesh import traffic
+import os
+import firmware as firmware_module
 
 firmware = script_input("firmware", type=Firmware,
                         label="Firmware for the nodes that are not repeaters")
@@ -53,8 +55,18 @@ OPTIONS = {
 sim_speed("max")
 nodes().firmware(firmware)
 nodes(tag="repeater").firmware(repeater_firmware)
-# Said in Reticulous's own language, so only to its own bases.
-RETICULOUS = nodes(base="reticulous-dev-sx1262") | nodes(base="reticulous-stable-sx1262")
+# Said in Reticulous's own language: to Reticulous's own bases, and to any other
+# Reticulous image (its program is reticulous.elf), such as a test build named differently.
+def reticulous_base(name):
+    try:
+        found = firmware_module.resolve(name)
+    except Exception:
+        return None
+    return found["base"] if os.path.basename(found["exec"]) == "reticulous.elf" else None
+
+BASES = {"reticulous-dev-sx1262", "reticulous-stable-sx1262"}
+BASES |= {b for b in map(reticulous_base, (firmware, repeater_firmware)) if b}
+RETICULOUS = nodes(base=tuple(sorted(BASES)))
 # Settings a radio reads when it starts (s.lora.0.community_radius) come
 # before the startup script starts it.
 if reticulous_settings.strip() not in ("", "none"):
