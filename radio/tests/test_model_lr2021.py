@@ -413,3 +413,33 @@ def test_cca_reports_the_loudest_level_it_heard_and_ends_in_timeout(chip):
     assert -((r[1] << 1) | ((r[3] >> 1) & 1)) / 2 == -60
     chip.ether.expect("state", mode="CAD")
     chip.ether.expect("state", mode="STDBY_XOSC")
+
+
+def test_a_preamble_longer_than_programmed_is_detected_but_never_synced(chip):
+    """The chip syncs only to a preamble no longer than it is programmed for
+    (bench, 2026-10-21: programmed for 16 symbols, none of a 24-symbol
+    sender's frames; programmed for 24, both). A longer one raises its
+    preamble detection and then nothing, not even a header error, and
+    receiving goes on; one exactly as long as programmed is taken."""
+    chip.configure()
+    chip.start_rx()
+    base = chip.stats()
+    sym_us = TSYM * 1e6
+
+    def frame(eid, preamble, payload):
+        pre = int((preamble + 4.25) * sym_us)
+        hdr = pre + int(8 * sym_us)
+        chip.ether.rx_begin(eid, -70, pre, hdr, hdr + 50_000)
+        time.sleep(hdr / 1e6 + 0.03)        # past where its header falls
+        chip.ether.rx_end(eid, payload, rssi=-70)
+
+    frame(1, PRE + 1, b"long")
+    seen = chip.wait_irq(PREAMBLE)
+    time.sleep(0.03)
+    seen |= chip.irq()
+    assert seen & (HEADER_VALID | HEADER_ERR | RX_DONE) == 0
+    assert chip.rx_fifo_level() == 0
+    assert chip.stats()[3] - base[3] == 0           # no header valid
+    frame(2, PRE, b"just")
+    chip.wait_irq(RX_DONE)
+    assert chip.read_rx_fifo(4) == b"just"

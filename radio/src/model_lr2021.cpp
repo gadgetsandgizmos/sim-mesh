@@ -370,6 +370,7 @@ struct LrState {
     LrAirFrame air[kLrAirFrames];
     int lockId = 0;
     bool hdrOk = true;      /* the header's fate, known at rx_begin (VirtualRxBegin.hdrOk) */
+    bool synced = true;     /* whether the locked frame's preamble lets the chip sync (modelRxBegin) */
     int64_t heardEndUs = 0;
 
     int txId = 0;
@@ -1117,6 +1118,13 @@ void rxHdrCb(void* arg)
 {
     auto* c = (simradio*)arg;
     S()->lock();
+    if (!c->st.synced) {
+        /* Never synced (a preamble longer than programmed, modelRxBegin):
+         * no header event at all; the chip goes back to hunting. */
+        dropLock(c);
+        S()->unlock();
+        return;
+    }
     bool ok = c->st.hdrOk;
     if (ok) {
         c->st.nHdrValid++;
@@ -1202,6 +1210,15 @@ void modelRxBegin(simradio* c, const VirtualRxBegin& f)
 
     d.lockId = f.id;
     d.hdrOk = f.hdrOk;
+    /* The chip syncs only to a preamble no longer than it is programmed
+     * for: on the bench (2026-10-21), programmed for 16 symbols it decoded
+     * none of a 24-symbol sender's frames while still detecting their
+     * preambles, and programmed for 24 it took 16 and 24 alike. The
+     * sender's count is in the frame's own timing: its sync comes
+     * (preamble + 4.25) symbols after its start (both chip models send so).
+     * A longer one is detected and then lost at its header, silently. */
+    double sentPreamble = (double)(f.tPre - f.t0) / (symbolSeconds(d) * 1e6) - 4.25;
+    d.synced = std::lround(sentPreamble) <= d.preamble;
     stopTimer(c->tRxTimeout);   /* something was found */
     int64_t syncUs = f.tPre - f.t0;
     int64_t foundUs = (int64_t)(kPreambleFoundSymbols * symbolSeconds(d) * 1e6);
